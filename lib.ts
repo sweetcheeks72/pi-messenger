@@ -350,6 +350,192 @@ export function coloredAgentName(name: string): string {
   return `\x1b[${agentColorCode(name)}m${name}\x1b[0m`;
 }
 
+// =============================================================================
+// Cost Estimation
+// =============================================================================
+
+/** Model pricing per 1M tokens (input, output) in USD */
+const MODEL_PRICING: Record<string, [number, number]> = {
+  "claude-sonnet-4-5": [3.0, 15.0],
+  "claude-sonnet-4": [3.0, 15.0],
+  "claude-opus-4": [15.0, 75.0],
+  "claude-haiku-4": [0.80, 4.0],
+  "gpt-4o": [2.5, 10.0],
+  "gpt-4.1": [2.0, 8.0],
+  "gemini-2.5-pro": [1.25, 10.0],
+  "gemini-2.5-flash": [0.15, 0.60],
+  "o3": [2.0, 8.0],
+  "o4-mini": [1.10, 4.40],
+  "deepseek-r1": [0.55, 2.19],
+};
+
+export function estimateCost(tokens: number, model?: string): number {
+  if (!model || tokens === 0) return 0;
+  const key = Object.keys(MODEL_PRICING).find(k => model.toLowerCase().includes(k));
+  if (!key) return 0;
+  const [inputRate, outputRate] = MODEL_PRICING[key];
+  // Rough estimate: assume 60% input, 40% output
+  const avgRate = (inputRate * 0.6 + outputRate * 0.4) / 1_000_000;
+  return tokens * avgRate;
+}
+
+export function formatCost(cost: number): string {
+  if (cost === 0) return "";
+  if (cost < 0.01) return `~$${(cost * 100).toFixed(1)}¢`;
+  return `~$${cost.toFixed(2)}`;
+}
+
+// =============================================================================
+// Progress Bar
+// =============================================================================
+
+export function renderProgressBar(completed: number, total: number, width: number): string {
+  if (total === 0) return "";
+  const pct = Math.min(1, completed / total);
+  const filled = Math.round(pct * width);
+  const empty = width - filled;
+  const bar = "█".repeat(filled) + "░".repeat(empty);
+  const pctStr = `${Math.round(pct * 100)}%`;
+  return `${bar} ${completed}/${total} (${pctStr})`;
+}
+
+// =============================================================================
+// Spinner
+// =============================================================================
+
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+export function getSpinnerFrame(): string {
+  const idx = Math.floor(Date.now() / 100) % SPINNER_FRAMES.length;
+  return SPINNER_FRAMES[idx];
+}
+
+// =============================================================================
+// Tool Icons
+// =============================================================================
+
+export const TOOL_ICONS: Record<string, string> = {
+  read: "📖",
+  edit: "✏️",
+  write: "💾",
+  bash: "$",
+  ls: "📂",
+  fetch_content: "🌐",
+  web_search: "🔍",
+  mcp: "🔌",
+  interactive_shell: "🖥️",
+  interview: "📋",
+  design_deck: "🎨",
+  switch_model: "🔄",
+  review_loop: "🔁",
+  annotate: "🏷️",
+};
+
+export function getToolIcon(toolName: string): string {
+  return TOOL_ICONS[toolName] ?? "⚙️";
+}
+
+// =============================================================================
+// Sparkline
+// =============================================================================
+
+const SPARK_CHARS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+export function renderSparkline(values: number[], width: number): string {
+  if (values.length === 0) return "";
+  const display = values.slice(-width);
+  const max = Math.max(...display, 1);
+  return display.map(v => SPARK_CHARS[Math.min(7, Math.floor((v / max) * 7))]).join("");
+}
+
+/**
+ * Render a file tree visualization from file paths.
+ * 
+ *   src/
+ *   ├── auth.ts  ✏️
+ *   └── utils/
+ *       └── hash.ts  💾
+ */
+export function renderFileTree(
+  files: Array<{ path: string; action?: string }>,
+  maxWidth = 60,
+): string[] {
+  if (files.length === 0) return [];
+
+  // Build tree
+  const tree: Record<string, unknown> = {};
+  for (const { path: fp, action } of files) {
+    const parts = fp.replace(/^~\//, "").split("/");
+    let node = tree as Record<string, unknown>;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (!node[parts[i]]) node[parts[i]] = {};
+      node = node[parts[i]] as Record<string, unknown>;
+    }
+    node[parts[parts.length - 1]] = action || "modified";
+  }
+
+  const lines: string[] = [];
+  renderTreeNode(tree, "", lines, maxWidth);
+  return lines;
+}
+
+function renderTreeNode(
+  node: Record<string, unknown>,
+  prefix: string,
+  lines: string[],
+  maxWidth: number,
+): void {
+  const entries = Object.entries(node);
+  for (let i = 0; i < entries.length; i++) {
+    const [name, value] = entries[i];
+    const last = i === entries.length - 1;
+    const connector = last ? "└── " : "├── ";
+    const childPrefix = prefix + (last ? "    " : "│   ");
+
+    if (typeof value === "string") {
+      const icon = value === "created" ? " 💾" : value === "deleted" ? " 🗑️" : " ✏️";
+      lines.push((prefix + connector + name + icon).slice(0, maxWidth));
+    } else {
+      lines.push((prefix + connector + name + "/").slice(0, maxWidth));
+      renderTreeNode(value as Record<string, unknown>, childPrefix, lines, maxWidth);
+    }
+  }
+}
+
+/**
+ * Render an agent execution pipeline visualization.
+ * 
+ *   ✓ Plan ─→ ● Execute ─→ ○ Review ─→ ○ Done
+ */
+export function renderAgentPipeline(
+  steps: Array<{ label: string; status: "done" | "active" | "pending" | "error" }>,
+): string {
+  return steps.map(step => {
+    const icon = step.status === "done" ? "✓"
+               : step.status === "active" ? "●"
+               : step.status === "error" ? "✗"
+               : "○";
+    return `${icon} ${step.label}`;
+  }).join(" ─→ ");
+}
+
+/**
+ * Render a diff stats bar: +5 -3 ████░░ 8 changes
+ */
+export function renderDiffStatsBar(diffText: string): string {
+  let additions = 0, deletions = 0;
+  for (const line of diffText.split("\n")) {
+    if (line.startsWith("+")) additions++;
+    else if (line.startsWith("-")) deletions++;
+  }
+  const total = additions + deletions;
+  if (total === 0) return "";
+  const barW = Math.min(12, total);
+  const addBar = Math.max(0, Math.round((additions / total) * barW));
+  const delBar = barW - addBar;
+  return `+${additions} -${deletions}  ${"█".repeat(addBar)}${"░".repeat(delBar)}  ${total} changes`;
+}
+
 export function extractFolder(cwd: string): string {
   return basename(cwd) || cwd;
 }

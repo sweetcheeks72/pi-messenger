@@ -9,6 +9,10 @@ export interface ToolEntry {
   args: string;
   startMs: number;
   endMs: number;
+  /** For edit/write tools: captured diff or content preview */
+  diffPreview?: string;
+  /** Whether the tool succeeded */
+  success?: boolean;
 }
 
 export interface AgentProgress {
@@ -22,13 +26,30 @@ export interface AgentProgress {
   tokens: number;
   durationMs: number;
   error?: string;
+  /** Files modified by this agent (paths from edit/write tool calls) */
+  filesModified: string[];
+  /** Model used by this agent */
+  model?: string;
+  /** Tool call timestamps for sparkline (calls per 10s bucket) */
+  toolCallBuckets: number[];
+  /** Start time for bucket calculation */
+  bucketStartMs?: number;
+  /** Timestamp when thinking started (no active tool) */
+  thinkingStartMs?: number;
 }
 
 // Event types from pi's --mode json output
 export interface PiEvent {
   type: string;
   toolName?: string;
+  toolCallId?: string;
   args?: Record<string, unknown>;
+  result?: {
+    content?: Array<{ type: string; text?: string }>;
+    isError?: boolean;
+    details?: { diff?: string; firstChangedLine?: number };
+  };
+  isError?: boolean;
   message?: {
     role: string;
     usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
@@ -46,6 +67,8 @@ export function createProgress(agent: string): AgentProgress {
     toolCallCount: 0,
     tokens: 0,
     durationMs: 0,
+    filesModified: [],
+    toolCallBuckets: [],
   };
 }
 
@@ -58,6 +81,38 @@ export function parseJsonlLine(line: string): PiEvent | null {
   }
 }
 
+const BUCKET_INTERVAL_MS = 10_000; // 10s per sparkline bucket
+
+function updateToolBucket(progress: AgentProgress): void {
+  const now = Date.now();
+  if (!progress.bucketStartMs) {
+    progress.bucketStartMs = now;
+    progress.toolCallBuckets = [1];
+    return;
+  }
+  const elapsed = now - progress.bucketStartMs;
+  const bucketIdx = Math.floor(elapsed / BUCKET_INTERVAL_MS);
+  // Pad with zeros for empty buckets
+  while (progress.toolCallBuckets.length <= bucketIdx) {
+    progress.toolCallBuckets.push(0);
+  }
+  progress.toolCallBuckets[bucketIdx]++;
+  // Keep max 30 buckets (5 min)
+  if (progress.toolCallBuckets.length > 30) {
+    progress.toolCallBuckets = progress.toolCallBuckets.slice(-30);
+    progress.bucketStartMs = now - (30 * BUCKET_INTERVAL_MS);
+  }
+}
+
+function trackFileModified(progress: AgentProgress, toolName: string, args?: Record<string, unknown>): void {
+  if (toolName !== "edit" && toolName !== "write") return;
+  const filePath = args?.path ?? args?.file_path;
+  if (typeof filePath !== "string") return;
+  if (!progress.filesModified.includes(filePath)) {
+    progress.filesModified.push(filePath);
+  }
+}
+
 export function updateProgress(progress: AgentProgress, event: PiEvent, startTime: number): void {
   progress.durationMs = Date.now() - startTime;
 
@@ -67,30 +122,49 @@ export function updateProgress(progress: AgentProgress, event: PiEvent, startTim
       progress.currentTool = event.toolName;
       progress.currentToolArgs = extractArgsPreview(event.args);
       progress.currentToolStartMs = Date.now();
+      progress.thinkingStartMs = undefined;
+      // Track file modifications
+      if (event.toolName) {
+        trackFileModified(progress, event.toolName, event.args);
+      }
       break;
 
     case "tool_execution_end":
       progress.toolCallCount++;
+      updateToolBucket(progress);
       if (progress.currentTool) {
-        progress.recentTools.push({
+        const entry: ToolEntry = {
           tool: progress.currentTool,
           args: progress.currentToolArgs ?? "",
           startMs: progress.currentToolStartMs ?? Date.now(),
           endMs: Date.now(),
-        });
+          success: !event.isError,
+        };
+        // Capture diff preview for edit tools
+        if (progress.currentTool === "edit" && event.result?.details?.diff) {
+          entry.diffPreview = event.result.details.diff;
+        }
+        progress.recentTools.push(entry);
       }
       progress.currentTool = undefined;
       progress.currentToolArgs = undefined;
       progress.currentToolStartMs = undefined;
+      // Start thinking timer when no tool is active
+      progress.thinkingStartMs = Date.now();
       break;
 
     case "message_end":
       if (event.message?.usage) {
         progress.tokens += (event.message.usage.input ?? 0) + (event.message.usage.output ?? 0);
       }
+      if (event.message?.model) {
+        progress.model = event.message.model;
+      }
       if (event.message?.errorMessage) {
         progress.error = event.message.errorMessage;
       }
+      // Thinking starts after message processing
+      progress.thinkingStartMs = Date.now();
       break;
   }
 }

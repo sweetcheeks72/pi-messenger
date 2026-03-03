@@ -10,6 +10,7 @@ import type { Task } from "./crew/types.js";
 import { getLiveWorkers } from "./crew/live-progress.js";
 import { hasActiveWorker } from "./crew/registry.js";
 import { cancelPlanningRun } from "./crew/state.js";
+import { listCheckpoints, restoreCheckpoint } from "./crew/utils/checkpoint.js";
 
 interface ConfirmAction {
   type: "reset" | "cascade-reset" | "delete" | "cancel-planning";
@@ -35,6 +36,8 @@ export interface CrewViewState {
   feedFocus: boolean;
   mentionCandidates: string[];
   mentionIndex: number;
+  /** Scroll lock: true when user has scrolled up (auto-scroll paused) */
+  scrollLocked: boolean;
 }
 
 export function createCrewViewState(): CrewViewState {
@@ -56,6 +59,7 @@ export function createCrewViewState(): CrewViewState {
     feedFocus: false,
     mentionCandidates: [],
     mentionIndex: -1,
+    scrollLocked: false,
   };
 }
 
@@ -462,6 +466,22 @@ export function handleCrewKeyBinding(
   }
   if (matchesKey(data, "shift+r") && ["done", "blocked", "in_progress"].includes(task.status)) {
     viewState.confirmAction = { type: "cascade-reset", taskId: task.id, label: task.title };
+    tui.requestRender();
+    return;
+  }
+  // Checkpoint restore: Shift+C to restore to pre-task state
+  if (matchesKey(data, "shift+c") && task.status === "done") {
+    const checkpoints = listCheckpoints(cwd, task.id);
+    if (checkpoints.some(cp => cp.label === "pre")) {
+      const success = restoreCheckpoint(cwd, task.id, "pre");
+      if (success) {
+        setNotification(viewState, tui, true, `⏪ Restored to pre-task checkpoint for ${task.id}`);
+      } else {
+        setNotification(viewState, tui, false, `Failed to restore checkpoint for ${task.id}`);
+      }
+    } else {
+      setNotification(viewState, tui, false, `No checkpoint available for ${task.id}`);
+    }
     tui.requestRender();
     return;
   }

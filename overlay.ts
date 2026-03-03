@@ -357,6 +357,7 @@ export class MessengerOverlay implements Component, Focusable {
       if (this.crewViewState.mode === "detail") {
         this.crewViewState.detailScroll = Math.max(0, this.crewViewState.detailScroll - 1);
         this.crewViewState.detailAutoScroll = false;
+        this.crewViewState.scrollLocked = true;
       } else {
         navigateTask(this.crewViewState, -1, tasks.length);
       }
@@ -368,6 +369,7 @@ export class MessengerOverlay implements Component, Focusable {
       if (this.crewViewState.mode === "detail") {
         this.crewViewState.detailScroll++;
         this.crewViewState.detailAutoScroll = false;
+        // Don't set scrollLocked on down — user might be scrolling to bottom
       } else {
         navigateTask(this.crewViewState, 1, tasks.length);
       }
@@ -391,6 +393,7 @@ export class MessengerOverlay implements Component, Focusable {
       if (this.crewViewState.mode === "detail") {
         this.crewViewState.detailScroll = 0;
         this.crewViewState.detailAutoScroll = true;
+        this.crewViewState.scrollLocked = false;
       }
       this.tui.requestRender();
       return;
@@ -401,6 +404,7 @@ export class MessengerOverlay implements Component, Focusable {
         this.crewViewState.mode = "detail";
         this.crewViewState.detailScroll = 0;
         this.crewViewState.detailAutoScroll = true;
+        this.crewViewState.scrollLocked = false;
         this.tui.requestRender();
       }
       return;
@@ -687,7 +691,7 @@ export class MessengerOverlay implements Component, Focusable {
     }
 
     lines.push(border("├" + "─".repeat(innerW) + "┤"));
-    lines.push(row(renderLegend(this.theme, this.cwd, sectionW, this.crewViewState, selectedTask)));
+    lines.push(row(renderLegend(this.theme, this.cwd, sectionW, this.crewViewState, selectedTask, this.crewViewState.scrollLocked)));
     lines.push(border("╰" + "─".repeat(innerW) + "╯"));
 
     if (allEvents.length > 0) {

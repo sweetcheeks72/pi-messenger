@@ -328,6 +328,16 @@ export function spawnWorkerForTask(
   const worker = spawnLobbyWorker(cwd, taskPrompt);
   if (!worker) return null;
 
+  // Create pre-task checkpoint for rollback capability
+  try {
+    // Dynamic import for ESM compatibility (checkpoint is best-effort)
+    import("./utils/checkpoint.js").then(({ createCheckpoint }) => {
+      createCheckpoint(cwd, taskId, "pre", `pre: ${task.title}`);
+    }).catch(() => {});
+  } catch {
+    // Checkpoint is best-effort, don't block on failure
+  }
+
   removeLiveWorker(cwd, lobbyTaskId(worker.lobbyId));
   worker.assignedTaskId = taskId;
   if (worker.aliveFile) {

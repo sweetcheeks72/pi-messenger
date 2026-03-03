@@ -10,6 +10,15 @@ import {
   computeStatus,
   STATUS_INDICATORS,
   agentHasTask,
+  estimateCost,
+  formatCost,
+  renderProgressBar,
+  getSpinnerFrame,
+  getToolIcon,
+  renderSparkline,
+  renderFileTree,
+  renderAgentPipeline,
+  renderDiffStatsBar,
   type Dirs,
   type MessengerState,
 } from "./lib.js";
@@ -31,6 +40,7 @@ import { formatFeedLine as sharedFormatFeedLine, type FeedEvent } from "./feed.j
 import { discoverCrewAgents } from "./crew/utils/discover.js";
 import { loadConfig } from "./config.js";
 import { loadCrewConfig } from "./crew/utils/config.js";
+import { listCheckpoints, getCheckpointDiff } from "./crew/utils/checkpoint.js";
 import { getLobbyWorkerCount } from "./crew/lobby.js";
 import type { CrewViewState } from "./overlay-actions.js";
 
@@ -48,19 +58,26 @@ function renderActivityLog(
   currentToolArgs: string | undefined,
   startedAt: number,
   width: number,
+  thinkingStartMs?: number,
 ): string[] {
   const lines: string[] = [];
   for (const entry of tools) {
     const elapsed = formatElapsed(entry.startMs - startedAt);
+    const icon = getToolIcon(entry.tool);
     const args = entry.args ? ` ${entry.args}` : "";
-    lines.push(truncateToWidth(`  [${elapsed}] ${entry.tool}${args}`, width));
+    lines.push(truncateToWidth(`  [${elapsed}] ${icon} ${entry.tool}${args}`, width));
   }
   if (currentTool) {
     const elapsed = formatElapsed(Date.now() - startedAt);
+    const icon = getToolIcon(currentTool);
     const args = currentToolArgs ? ` ${currentToolArgs}` : "";
-    lines.push(truncateToWidth(`  → [${elapsed}] ${currentTool}${args}`, width));
+    lines.push(truncateToWidth(`  → [${elapsed}] ${icon} ${currentTool}${args}`, width));
   } else {
-    lines.push(`  → thinking...`);
+    const spinner = getSpinnerFrame();
+    const thinkingDuration = thinkingStartMs
+      ? ` (${formatElapsed(Date.now() - thinkingStartMs)})`
+      : "";
+    lines.push(`  ${spinner} thinking${thinkingDuration}...`);
   }
   return lines;
 }
@@ -114,9 +131,9 @@ export function renderStatusBar(theme: Theme, cwd: string, width: number): strin
   }
 
   const ready = crewStore.getReadyTasks(cwd, { advisory: crewConfig.dependencies === "advisory" });
-  const progress = `${plan.completed_count}/${plan.task_count}`;
-  const planLabel = crewStore.getPlanLabel(plan, 40);
-  let base = `📋 ${planLabel}: ${progress}`;
+  const progressBar = renderProgressBar(plan.completed_count, plan.task_count, 12);
+  const planLabel = crewStore.getPlanLabel(plan, 30);
+  let base = `📋 ${planLabel}: ${progressBar}`;
   if (ready.length > 0) {
     const readyLabel = crewConfig.dependencies === "advisory" ? "available" : "ready";
     base += ` │ ${ready.length} ${readyLabel}`;
@@ -148,14 +165,41 @@ export function renderWorkersSection(theme: Theme, cwd: string, width: number, m
 
   const lines: string[] = [];
   for (const info of workers) {
+    const toolIcon = info.progress.currentTool ? getToolIcon(info.progress.currentTool) : getSpinnerFrame();
     const activity = info.progress.currentTool
-      ? `${info.progress.currentTool}${info.progress.currentToolArgs ? `(${info.progress.currentToolArgs})` : ""}`
-      : "thinking";
+      ? `${toolIcon} ${info.progress.currentTool}${info.progress.currentToolArgs ? `(${info.progress.currentToolArgs})` : ""}`
+      : `${toolIcon} thinking`;
     const elapsed = formatDuration(Date.now() - info.startedAt);
     const tokens = info.progress.tokens > 1000
       ? `${(info.progress.tokens / 1000).toFixed(0)}k`
       : `${info.progress.tokens}`;
-    const line = `⚡ ${info.name} ${formatTaskLabel(info.taskId)}  ${activity}  ${theme.fg("dim", `${elapsed}  ${tokens} tok`)}`;
+    
+    // Cost estimation
+    const cost = estimateCost(info.progress.tokens, info.progress.model);
+    const costStr = formatCost(cost);
+    const costDisplay = costStr ? ` ${costStr}` : "";
+    
+    // Model badge
+    const modelBadge = info.progress.model
+      ? theme.fg("dim", `[${info.progress.model.replace(/^.*\//, "").slice(0, 16)}]`)
+      : "";
+    
+    // Sparkline for activity density
+    const sparkline = info.progress.toolCallBuckets.length > 2
+      ? " " + theme.fg("dim", renderSparkline(info.progress.toolCallBuckets, 8))
+      : "";
+
+    // Agent pipeline mini-visualization
+    const pipelinePhase = info.progress.currentTool
+      ? (info.progress.toolCallCount > 0 ? "tools" : "first-tool")
+      : (info.progress.tokens > 0 ? "thinking" : "starting");
+    const pipelineSteps = [
+      { label: "Think", status: (pipelinePhase === "thinking" ? "active" : pipelinePhase === "starting" ? "active" : "done") as "done" | "active" | "pending" },
+      { label: "Tools", status: (pipelinePhase === "tools" || pipelinePhase === "first-tool" ? "active" : pipelinePhase === "thinking" && info.progress.toolCallCount > 0 ? "done" : "pending") as "done" | "active" | "pending" },
+    ];
+    const pipeline = renderAgentPipeline(pipelineSteps);
+
+    const line = `⚡ ${info.name} ${formatTaskLabel(info.taskId)}  ${pipeline}  ${activity}  ${theme.fg("dim", `${elapsed}  ${tokens} tok${costDisplay}`)}${sparkline} ${modelBadge}`;
     lines.push(truncateToWidth(line, width));
   }
   return lines;
@@ -234,13 +278,40 @@ export function renderFeedSection(theme: Theme, events: FeedEvent[], width: numb
     if (isMessage) {
       lines.push(...renderMessageLines(theme, event, width));
     } else {
-      const formatted = sharedFormatFeedLine(event);
+      // Add event-type icons for richer feed rendering
+      const eventIcon = getEventIcon(event.type);
+      const formatted = `${eventIcon} ${sharedFormatFeedLine(event)}`;
       const dimmed = DIM_EVENTS.has(event.type) || !isNew;
       lines.push(truncateToWidth(dimmed ? theme.fg("dim", formatted) : formatted, width));
     }
     lastWasMessage = isMessage;
   }
   return lines;
+}
+
+function getEventIcon(type: string): string {
+  switch (type) {
+    case "task.done": return "✅";
+    case "task.start": return "▶️";
+    case "task.block": return "🚫";
+    case "task.unblock": return "🔓";
+    case "task.reset": return "🔄";
+    case "task.delete": return "🗑️";
+    case "task.split": return "✂️";
+    case "task.revise": case "task.revise-tree": return "📝";
+    case "plan.start": return "📋";
+    case "plan.done": return "🎉";
+    case "plan.failed": return "💥";
+    case "plan.cancel": return "⛔";
+    case "plan.pass.start": case "plan.pass.done": return "🔄";
+    case "plan.review.start": case "plan.review.done": return "🔍";
+    case "join": return "👋";
+    case "leave": return "👋";
+    case "commit": return "📦";
+    case "test": return "🧪";
+    case "stuck": return "⚠️";
+    default: return "•";
+  }
 }
 
 function formatTaskLabel(taskId: string): string {
@@ -385,9 +456,12 @@ export function renderPlanningState(theme: Theme, cwd: string, width: number, he
     const p = activeWorker.progress;
     const tokens = p.tokens > 1000 ? `${(p.tokens / 1000).toFixed(0)}k` : `${p.tokens}`;
     const elapsed = formatElapsed(Date.now() - activeWorker.startedAt);
-    lines.push(`  ${activeWorker.agent}  │  ${p.toolCallCount} calls  ${tokens} tokens  ${elapsed}`);
+    const cost = estimateCost(p.tokens, p.model);
+    const costStr = formatCost(cost);
+    const costDisplay = costStr ? `  ${costStr}` : "";
+    lines.push(`  ${activeWorker.agent}  │  ${p.toolCallCount} calls  ${tokens} tokens  ${elapsed}${costDisplay}`);
     lines.push("");
-    const activityLines = renderActivityLog(p.recentTools, p.currentTool, p.currentToolArgs, activeWorker.startedAt, width);
+    const activityLines = renderActivityLog(p.recentTools, p.currentTool, p.currentToolArgs, activeWorker.startedAt, width, p.thinkingStartMs);
     lines.push(...activityLines);
   } else {
     const tail = readPlanningTail(cwd, 5);
@@ -415,7 +489,10 @@ export function renderLegend(
   width: number,
   viewState: CrewViewState,
   task: Task | null,
+  scrollLocked?: boolean,
 ): string {
+  // Scroll lock indicator prefix
+  const scrollPrefix = scrollLocked ? theme.fg("warning", "📌 PINNED ") : "";
   if (viewState.confirmAction) {
     const text = renderConfirmBar(viewState.confirmAction.taskId, viewState.confirmAction.label, viewState.confirmAction.type);
     return truncateToWidth(theme.fg("warning", appendUniversalHints(text)), width);
@@ -445,21 +522,21 @@ export function renderLegend(
   }
 
   if (viewState.mode === "detail" && task) {
-    return truncateToWidth(theme.fg("dim", appendUniversalHints(renderDetailStatusBar(cwd, task))), width);
+    return truncateToWidth(scrollPrefix + theme.fg("dim", appendUniversalHints(renderDetailStatusBar(cwd, task))), width);
   }
 
   if (task) {
-    return truncateToWidth(theme.fg("dim", appendUniversalHints(renderListStatusBar(cwd, task))), width);
+    return truncateToWidth(scrollPrefix + theme.fg("dim", appendUniversalHints(renderListStatusBar(cwd, task))), width);
   }
 
   if (isPlanningForCwd(cwd)) {
     return truncateToWidth(
-      theme.fg("dim", appendUniversalHints(`c:Cancel  v:${coordHint(cwd)}  +/-:Wkrs  Esc:Close`)),
+      scrollPrefix + theme.fg("dim", appendUniversalHints(`c:Cancel  v:${coordHint(cwd)}  +/-:Wkrs  Esc:Close`)),
       width,
     );
   }
 
-  return truncateToWidth(theme.fg("dim", appendUniversalHints(`m:Chat  v:${coordHint(cwd)}  +/-:Wkrs  Esc:Close`)), width);
+  return truncateToWidth(scrollPrefix + theme.fg("dim", appendUniversalHints(`m:Chat  v:${coordHint(cwd)}  +/-:Wkrs  Esc:Close`)), width);
 }
 
 export function renderDetailView(cwd: string, task: Task, width: number, height: number, viewState: CrewViewState): string[] {
@@ -471,7 +548,13 @@ export function renderDetailView(cwd: string, task: Task, width: number, height:
 
   lines.push(`${task.id}: ${task.title}`);
   if (live) {
-    lines.push(`Status: ${task.status}  │  ${live.name}  │  ${live.progress.toolCallCount} calls  ${tokens} tokens  ${elapsed}`);
+    const cost = estimateCost(live.progress.tokens, live.progress.model);
+    const costStr = formatCost(cost);
+    const costDisplay = costStr ? `  ${costStr}` : "";
+    const modelBadge = live.progress.model
+      ? `  [${live.progress.model.replace(/^.*\//, "").slice(0, 20)}]`
+      : "";
+    lines.push(`Status: ${task.status}  │  ${live.name}  │  ${live.progress.toolCallCount} calls  ${tokens} tokens  ${elapsed}${costDisplay}${modelBadge}`);
   } else {
     const typeText = task.milestone ? "  │  Type: milestone" : "";
     const assignedText = task.assigned_to ? `  │  Assigned: ${task.assigned_to}` : "";
@@ -486,14 +569,76 @@ export function renderDetailView(cwd: string, task: Task, width: number, height:
   }
 
   if (live) {
+    // Sparkline activity graph
+    if (live.progress.toolCallBuckets.length > 2) {
+      lines.push(`Activity: ${renderSparkline(live.progress.toolCallBuckets, 20)}`);
+    }
+    
+    // File tree visualization (Cursor-like source control view)
+    if (live.progress.filesModified.length > 0) {
+      const fileCount = live.progress.filesModified.length;
+      lines.push(`Files modified (${fileCount}):`);
+      if (fileCount <= 12) {
+        // Tree view for manageable count
+        const fileEntries = live.progress.filesModified.map(f => ({ path: f, action: "modified" }));
+        const treeLines = renderFileTree(fileEntries, width - 2);
+        for (const tl of treeLines) {
+          lines.push(`  ${tl}`);
+        }
+      } else {
+        // Compact list for large count
+        const preview = live.progress.filesModified.slice(0, 5)
+          .map(f => f.replace(/^.*\//, ""))
+          .join(", ");
+        lines.push(`  ${preview} +${fileCount - 5} more`);
+      }
+    }
+    
+    lines.push("");
     const activityLines = renderActivityLog(
       live.progress.recentTools,
       live.progress.currentTool,
       live.progress.currentToolArgs,
       live.startedAt,
       width,
+      live.progress.thinkingStartMs,
     );
     lines.push(...activityLines);
+    
+    // Inline diff viewer: show recent edit diffs with stats
+    const recentDiffs = live.progress.recentTools
+      .filter(t => t.tool === "edit" && t.diffPreview && t.success !== false)
+      .slice(-3); // Show last 3 diffs
+    if (recentDiffs.length > 0) {
+      lines.push("");
+      lines.push("── Recent Changes ──────────────────────");
+      for (const entry of recentDiffs) {
+        const filePath = entry.args || "file";
+        // Diff stats bar
+        const statsBar = entry.diffPreview ? renderDiffStatsBar(entry.diffPreview) : "";
+        lines.push(`  ${getToolIcon("edit")} ${filePath}  ${statsBar}`);
+        // Render diff lines with color indicators
+        const diffLines = (entry.diffPreview ?? "").split("\n");
+        const previewLines = diffLines.slice(0, 10);
+        for (const dl of previewLines) {
+          const m = dl.match(/^([+-\s])(\s*\d*)\s(.*)$/);
+          if (!m) continue;
+          const [, prefix, num, content] = m;
+          const lineNum = num.trim().padStart(4);
+          if (prefix === "+") {
+            lines.push(`    + ${lineNum} ${content}`);
+          } else if (prefix === "-") {
+            lines.push(`    - ${lineNum} ${content}`);
+          } else {
+            lines.push(`      ${lineNum} ${content}`);
+          }
+        }
+        if (diffLines.length > 10) {
+          lines.push(`    ... (${diffLines.length - 10} more lines)`);
+        }
+        lines.push("");
+      }
+    }
   } else {
     if (task.depends_on.length > 0) {
       lines.push("Dependencies:");
@@ -545,6 +690,30 @@ export function renderDetailView(cwd: string, task: Task, width: number, height:
         if (evidence.tests?.length) lines.push(`  Tests: ${evidence.tests.join(", ")}`);
         if (evidence.prs?.length) lines.push(`  PRs: ${evidence.prs.join(", ")}`);
       }
+      
+      // Git checkpoint info (rollback capability)
+      try {
+        const checkpoints = listCheckpoints(cwd, task.id);
+        if (checkpoints.length > 0) {
+          lines.push("");
+          lines.push("📸 Checkpoints (press R to restore):");
+          for (const cp of checkpoints) {
+            const when = formatRelativeTime(new Date(cp.timestamp).toISOString());
+            lines.push(`  ${cp.label === "pre" ? "⏪" : "⏩"} ${cp.label}: ${cp.commitHash.slice(0, 8)} (${when})`);
+          }
+          // Show diff summary between pre/post
+          const diffStat = getCheckpointDiff(cwd, task.id);
+          if (diffStat) {
+            lines.push("  Changes:");
+            for (const line of diffStat.split("\n").slice(0, 10)) {
+              lines.push(`    ${line}`);
+            }
+          }
+        }
+      } catch {
+        // Checkpoint display is best-effort
+      }
+      
       lines.push("");
     }
 
@@ -579,6 +748,13 @@ function renderDetailStatusBar(cwd: string, task: Task): string {
   if (task.status !== "in_progress" && !task.milestone) hints.push("p:Revise");
   if (task.status !== "in_progress" && !task.milestone) hints.push("P:Tree");
   if (!(task.status === "in_progress" && hasLiveWorker(cwd, task.id))) hints.push("x:Del");
+  // Checkpoint restore for completed tasks
+  if (task.status === "done") {
+    try {
+      const checkpoints = listCheckpoints(cwd, task.id);
+      if (checkpoints.some(cp => cp.label === "pre")) hints.push("C:Restore");
+    } catch { /* ignore */ }
+  }
   if (!isPlanningForCwd(cwd)) hints.push("m:Chat");
   hints.push(`v:${coordHint(cwd)}`, "f:Feed", "+/-:Wkrs", "←→:Nav");
   return hints.join("  ");

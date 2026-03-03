@@ -181,6 +181,10 @@ export async function execute(
 
     if (r.exitCode === 0) {
       if (task?.status === "done") {
+        // Create post-task checkpoint for rollback (async, best-effort)
+        import("../utils/checkpoint.js").then(({ createCheckpoint }) => {
+          createCheckpoint(cwd, taskId, "post", `post: ${task.title}`);
+        }).catch(() => {});
         succeeded.push(taskId);
       } else if (task?.status === "blocked") {
         blocked.push(taskId);
