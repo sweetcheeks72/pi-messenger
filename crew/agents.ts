@@ -254,7 +254,10 @@ async function runAgent(
       ? { ...process.env, ...envOverrides, ...workerFlag }
       : undefined;
 
-    const proc = spawn("pi", args, {
+    // Executable resolution: env var > crew config > default "pi"
+    const executable = process.env.PI_CREW_EXECUTABLE ?? config.work.executable ?? "pi";
+
+    const proc = spawn(executable, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
       ...(env ? { env } : {}),
@@ -262,6 +265,22 @@ async function runAgent(
     if (task.taskId) {
       registerWorker({ type: "worker", proc, name: workerName, cwd, taskId: task.taskId });
     }
+
+    // Guard against ENOENT and other spawn failures — without this handler
+    // Node.js would emit an uncaught error and crash the orchestrator.
+    // We also reset any in_progress task so it isn't stuck forever.
+    proc.on("error", (err) => {
+      process.stderr.write(
+        `[pi-messenger] Failed to spawn worker "${executable}": ${err.message} (${err.code ?? "unknown"})\n`
+      );
+      // The "close" event fires right after "error" with exitCode null.
+      // We proactively remove live worker tracking here so it isn't stuck
+      // if the close handler fires before we can react.
+      if (task.taskId) {
+        removeLiveWorker(cwd, task.taskId);
+        unregisterWorker(cwd, task.taskId);
+      }
+    });
     let gracefulShutdownRequested = false;
     let discoveredWorkerName: string | null = null;
 

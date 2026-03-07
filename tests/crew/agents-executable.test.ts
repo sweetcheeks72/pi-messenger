@@ -1,0 +1,214 @@
+/**
+ * Tests for crew/agents.ts — executable resolution and ENOENT guard.
+ *
+ * These tests mirror the equivalent lobby.test.ts reliability section,
+ * covering the agents (task-oriented) spawn path.
+ */
+
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { EventEmitter } from "node:events";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { spawnAgents } from "../../crew/agents.js";
+import { createTempCrewDirs, type TempCrewDirs } from "../helpers/temp-dirs.js";
+
+const spawnMock = vi.hoisted(() => vi.fn());
+
+vi.mock("node:child_process", () => ({
+  spawn: spawnMock,
+}));
+
+type MockProcess = EventEmitter & {
+  stdout: EventEmitter;
+  stderr: EventEmitter;
+  killed: boolean;
+  exitCode: number | null;
+  pid: number;
+  kill: ReturnType<typeof vi.fn>;
+};
+
+function createMockProcess(exitCode: number): MockProcess {
+  const proc = new EventEmitter() as MockProcess;
+  proc.stdout = new EventEmitter();
+  proc.stderr = new EventEmitter();
+  proc.killed = false;
+  proc.exitCode = null;
+  proc.pid = 99999;
+  proc.kill = vi.fn(() => true);
+
+  queueMicrotask(() => {
+    proc.exitCode = exitCode;
+    proc.emit("exit", exitCode);
+    proc.emit("close", exitCode);
+  });
+
+  return proc;
+}
+
+/** Create a minimal crew-worker agent config file in the temp dir. */
+function writeWorkerAgent(cwd: string): void {
+  const content = `---
+name: crew-worker
+description: Test worker
+crewRole: worker
+---
+You are a test worker.
+`;
+  const filePath = path.join(cwd, ".pi", "messenger", "crew", "agents", "crew-worker.md");
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, content);
+}
+
+describe("crew/agents — executable resolution & ENOENT guard", () => {
+  let dirs: TempCrewDirs;
+
+  beforeEach(() => {
+    dirs = createTempCrewDirs();
+    spawnMock.mockReset();
+    spawnMock.mockImplementation(() => createMockProcess(0));
+    // Ensure no leftover env var bleeds across tests
+    delete process.env.PI_CREW_EXECUTABLE;
+  });
+
+  // ── Executable resolution ────────────────────────────────────────────────
+
+  it("defaults to 'pi' when neither env var nor config.work.executable is set", async () => {
+    writeWorkerAgent(dirs.cwd);
+
+    await spawnAgents([{ agent: "crew-worker", task: "do work", taskId: "task-1" }], dirs.cwd);
+
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock.mock.calls[0][0]).toBe("pi");
+  });
+
+  it("uses PI_CREW_EXECUTABLE env var as the spawned executable", async () => {
+    writeWorkerAgent(dirs.cwd);
+    process.env.PI_CREW_EXECUTABLE = "my-custom-pi";
+
+    try {
+      await spawnAgents([{ agent: "crew-worker", task: "do work", taskId: "task-1" }], dirs.cwd);
+
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      expect(spawnMock.mock.calls[0][0]).toBe("my-custom-pi");
+    } finally {
+      delete process.env.PI_CREW_EXECUTABLE;
+    }
+  });
+
+  it("uses config.work.executable when env var is absent", async () => {
+    writeWorkerAgent(dirs.cwd);
+
+    // Write a crew.json that sets work.executable
+    const crewConfigPath = path.join(dirs.crewDir, "config.json");
+    fs.writeFileSync(
+      crewConfigPath,
+      JSON.stringify({ work: { executable: "helios-pi" } }),
+    );
+
+    await spawnAgents([{ agent: "crew-worker", task: "do work", taskId: "task-1" }], dirs.cwd);
+
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock.mock.calls[0][0]).toBe("helios-pi");
+  });
+
+  it("PI_CREW_EXECUTABLE takes priority over config.work.executable", async () => {
+    writeWorkerAgent(dirs.cwd);
+    process.env.PI_CREW_EXECUTABLE = "env-pi";
+
+    const crewConfigPath = path.join(dirs.crewDir, "config.json");
+    fs.writeFileSync(
+      crewConfigPath,
+      JSON.stringify({ work: { executable: "config-pi" } }),
+    );
+
+    try {
+      await spawnAgents([{ agent: "crew-worker", task: "do work", taskId: "task-1" }], dirs.cwd);
+
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      expect(spawnMock.mock.calls[0][0]).toBe("env-pi");
+    } finally {
+      delete process.env.PI_CREW_EXECUTABLE;
+    }
+  });
+
+  // ── ENOENT / spawn error guard ───────────────────────────────────────────
+
+  it("registers an 'error' handler on the spawned process to prevent crash", async () => {
+    writeWorkerAgent(dirs.cwd);
+
+    // Capture the mock proc before spawnAgents resolves
+    let capturedProc: MockProcess | null = null;
+    spawnMock.mockImplementationOnce((..._args: unknown[]) => {
+      const proc = createMockProcess(0);
+      capturedProc = proc;
+      return proc;
+    });
+
+    await spawnAgents([{ agent: "crew-worker", task: "do work", taskId: "task-1" }], dirs.cwd);
+
+    expect(capturedProc).not.toBeNull();
+    // Must have a registered 'error' listener (otherwise Node crashes on ENOENT)
+    expect((capturedProc as MockProcess).listenerCount("error")).toBeGreaterThan(0);
+  });
+
+  it("error handler does not throw when ENOENT fires", async () => {
+    writeWorkerAgent(dirs.cwd);
+
+    let capturedProc: MockProcess | null = null;
+    spawnMock.mockImplementationOnce((..._args: unknown[]) => {
+      // Return a proc that never closes on its own (so spawnAgents stays open)
+      const proc = new EventEmitter() as MockProcess;
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      proc.killed = false;
+      proc.exitCode = null;
+      proc.pid = 88888;
+      proc.kill = vi.fn();
+      capturedProc = proc;
+      // Emit close after error, as Node.js does
+      queueMicrotask(() => {
+        proc.emit("error", Object.assign(new Error("spawn pi ENOENT"), { code: "ENOENT" }));
+        proc.exitCode = -2;
+        proc.emit("close", -2);
+      });
+      return proc;
+    });
+
+    // spawnAgents must resolve without throwing
+    await expect(
+      spawnAgents([{ agent: "crew-worker", task: "do work", taskId: "task-1" }], dirs.cwd),
+    ).resolves.not.toThrow();
+
+    expect(capturedProc).not.toBeNull();
+    expect((capturedProc as MockProcess).listenerCount("error")).toBeGreaterThan(0);
+  });
+
+  it("spawn failure results in a failed AgentResult (not a crash)", async () => {
+    writeWorkerAgent(dirs.cwd);
+
+    spawnMock.mockImplementationOnce(() => {
+      const proc = new EventEmitter() as MockProcess;
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      proc.killed = false;
+      proc.exitCode = null;
+      proc.pid = 77777;
+      proc.kill = vi.fn();
+      queueMicrotask(() => {
+        proc.emit("error", Object.assign(new Error("spawn pi ENOENT"), { code: "ENOENT" }));
+        proc.exitCode = -2;
+        proc.emit("close", -2);
+      });
+      return proc;
+    });
+
+    const results = await spawnAgents(
+      [{ agent: "crew-worker", task: "do work", taskId: "task-2" }],
+      dirs.cwd,
+    );
+
+    expect(results).toHaveLength(1);
+    expect(results[0].exitCode).not.toBe(0);
+    expect(results[0].progress.status).toBe("failed");
+  });
+});
