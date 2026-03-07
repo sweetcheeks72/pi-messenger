@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 vi.mock("node:child_process", () => ({
+  execSync: vi.fn(() => "/usr/bin/which-pi\n"),
   spawn: vi.fn(() => {
     const handlers: Record<string, Function> = {};
     const proc: any = {
@@ -27,6 +28,7 @@ vi.mock("../../crew/store.js", () => ({
   getBaseCommit: vi.fn(() => "abc1234"),
   updateTask: vi.fn(),
   appendTaskProgress: vi.fn(),
+  incrementSpawnFailureCount: vi.fn(),
 }));
 
 vi.mock("../../feed.js", () => ({
@@ -420,6 +422,33 @@ describe("lobby workers", () => {
     expect(promptArg).not.toContain("Chat With Your Team");
   });
 
+  it("uses shared executable resolver fallback from which pi", async () => {
+    const childProc = await import("node:child_process");
+    const execSyncMock = vi.mocked(childProc.execSync);
+    execSyncMock.mockReturnValueOnce("/path/to/which/pi-binary\n");
+
+    const { spawn } = await import("node:child_process");
+    vi.mocked(spawn).mockClear();
+    delete process.env.PI_CREW_EXECUTABLE;
+    vi.mocked(spawn).mockClear();
+
+    // Ensure config has no executable override.
+    const config = await import("../../crew/utils/config.js");
+    vi.mocked(config.loadCrewConfig).mockReturnValue({
+      concurrency: { workers: 4 },
+      models: {},
+      artifacts: { enabled: false },
+      work: {},
+      coordination: "chatty",
+    } as any);
+
+    lobby.spawnLobbyWorker("/test/cwd");
+
+    const calls = vi.mocked(spawn).mock.calls;
+    expect(calls.length).toBe(1);
+    expect(calls[0][0]).toBe("/path/to/which/pi-binary");
+  });
+
   // ── Reliability: configurable executable & ENOENT handling ──────────────────
 
   it("uses PI_CREW_EXECUTABLE env var as the spawned executable", async () => {
@@ -465,6 +494,33 @@ describe("lobby workers", () => {
       if (orig === undefined) delete process.env.PI_CREW_EXECUTABLE;
       else process.env.PI_CREW_EXECUTABLE = orig;
     }
+  });
+
+  it("increments spawn failure count and logs concrete progress when assigned task fails to spawn", async () => {
+    const storeModule = await import("../../crew/store.js");
+    const { spawn } = await import("node:child_process");
+
+    const worker = lobby.spawnLobbyWorker("/test/cwd")!;
+    worker.assignedTaskId = "task-7";
+
+    const proc = worker.proc as any;
+    const errorHandler = proc._handlers["error"];
+    expect(errorHandler).toBeDefined();
+
+    const err = Object.assign(new Error("spawn failed with ENOENT"), {
+      code: "ENOENT",
+      syscall: "spawn",
+      path: "missing-pi",
+    });
+    errorHandler(err);
+
+    expect(storeModule.incrementSpawnFailureCount).toHaveBeenCalledWith("/test/cwd", "task-7");
+    expect(storeModule.appendTaskProgress).toHaveBeenCalledWith(
+      "/test/cwd",
+      "task-7",
+      "system",
+      expect.stringContaining("spawn failed with ENOENT"),
+    );
   });
 
   it("handles ENOENT gracefully: error handler is registered and does not throw", async () => {

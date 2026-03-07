@@ -4,7 +4,7 @@
  * Spawns pi processes with progress tracking, truncation, and artifacts.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -32,11 +32,30 @@ import { autonomousState, waitForConcurrencyChange } from "./state.js";
 import { registerWorker, unregisterWorker, killAll } from "./registry.js";
 import type { AgentTask, AgentResult } from "./types.js";
 import { generateMemorableName } from "../lib.js";
+import * as store from "./store.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const EXTENSION_DIR = path.resolve(__dirname, "..");
 const BUILTIN_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
+
+/**
+ * Resolve the pi executable path robustly.
+ * Priority: PI_CREW_EXECUTABLE env var > config.work.executable > `which pi` lookup > "pi" fallback
+ */
+export function resolveExecutable(config: CrewConfig): string {
+  if (process.env.PI_CREW_EXECUTABLE) return process.env.PI_CREW_EXECUTABLE;
+  if (config.work.executable) return config.work.executable;
+  try {
+    const found = execSync("which pi 2>/dev/null", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 1000,
+    }).trim();
+    if (found) return found;
+  } catch { /* fall through */ }
+  return "pi";
+}
 
 export interface SpawnOptions {
   onProgress?: (results: AgentResult[]) => void;
@@ -181,7 +200,7 @@ async function runAgent(
   const agentConfig = agents.find(a => a.name === task.agent);
   const progress = createProgress(task.agent);
   const startTime = Date.now();
-  const workerName = generateMemorableName();
+  const workerName = task.workerName ?? generateMemorableName();
 
   const role = agentConfig?.crewRole ?? "worker";
   const maxOutput = task.maxOutput
@@ -200,7 +219,115 @@ async function runAgent(
     }
   }
 
+  const executable = resolveExecutable(config);
+
   return new Promise((resolve) => {
+    let settled = false;
+    let cleanedUp = false;
+    let gracefulShutdownRequested = false;
+    let discoveredWorkerName: string | null = null;
+    let promptTmpDir: string | null = null;
+    let jsonlBuffer = "";
+    const events: PiEvent[] = [];
+    let stderr = "";
+
+    const resultArtifactPaths = artifactPaths ? {
+      input: artifactPaths.inputPath,
+      output: artifactPaths.outputPath,
+      jsonl: artifactPaths.jsonlPath,
+      metadata: artifactPaths.metadataPath,
+    } : undefined;
+
+    const cleanup = () => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+
+      if (task.taskId) {
+        removeLiveWorker(cwd, task.taskId);
+        unregisterWorker(cwd, task.taskId);
+      }
+
+      if (promptTmpDir) {
+        try { fs.rmSync(promptTmpDir, { recursive: true, force: true }); } catch {}
+      }
+
+      if (gracefulShutdownRequested && discoveredWorkerName && options.messengerDirs?.registry) {
+        try {
+          fs.unlinkSync(path.join(options.messengerDirs.registry, `${discoveredWorkerName}.json`));
+        } catch {}
+      }
+    };
+
+    const persistMetadata = (metadata: Record<string, unknown>) => {
+      if (!artifactPaths) return;
+      try {
+        writeMetadata(artifactPaths.metadataPath, metadata);
+      } catch {}
+    };
+
+    const finalize = (result: AgentResult) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+
+    const handleLaunchFailure = (err: NodeJS.ErrnoException) => {
+      const failureDetails = `Failed to spawn worker "${executable}": ${err.message} (${err.code ?? "unknown"})`;
+      process.stderr.write(`[pi-messenger] ${failureDetails}\n`);
+
+      progress.status = "failed";
+      progress.durationMs = Date.now() - startTime;
+      progress.error = failureDetails;
+
+      if (task.taskId) {
+        store.appendTaskProgress(cwd, task.taskId, "system", `Worker launch failed for ${workerName}: ${failureDetails}`);
+        store.incrementSpawnFailureCount(cwd, task.taskId);
+        const currentTask = store.getTask(cwd, task.taskId);
+        if (currentTask?.status === "in_progress" && currentTask.assigned_to === workerName) {
+          store.updateTask(cwd, task.taskId, {
+            status: "todo",
+            assigned_to: undefined,
+            started_at: undefined,
+            base_commit: undefined,
+          });
+        }
+      }
+
+      persistMetadata({
+        runId,
+        agent: task.agent,
+        index,
+        exitCode: 1,
+        durationMs: progress.durationMs,
+        tokens: progress.tokens,
+        truncated: false,
+        error: failureDetails,
+        spawnFailure: {
+          code: err.code,
+          errno: err.errno,
+          message: err.message,
+          path: err.path,
+          syscall: err.syscall,
+          taskId: task.taskId,
+          workerName,
+        },
+      });
+
+      finalize({
+        agent: task.agent,
+        exitCode: 1,
+        output: "",
+        truncated: false,
+        progress,
+        config: agentConfig,
+        taskId: task.taskId,
+        wasGracefullyShutdown: false,
+        error: failureDetails,
+        artifactPaths: resultArtifactPaths,
+      });
+    };
+
     // Build args for pi command
     const args = ["--mode", "json", "--no-session", "-p"];
     const model = task.modelOverride ?? agentConfig?.model;
@@ -236,7 +363,6 @@ async function runAgent(
     // Pass extension so workers can use pi_messenger
     args.push("--extension", EXTENSION_DIR);
 
-    let promptTmpDir: string | null = null;
     if (agentConfig?.systemPrompt) {
       promptTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-agent-"));
       const promptPath = path.join(promptTmpDir, `${task.agent.replace(/[^\w.-]/g, "_")}.md`);
@@ -254,38 +380,18 @@ async function runAgent(
       ? { ...process.env, ...envOverrides, ...workerFlag }
       : undefined;
 
-    // Executable resolution: env var > crew config > default "pi"
-    const executable = process.env.PI_CREW_EXECUTABLE ?? config.work.executable ?? "pi";
-
     const proc = spawn(executable, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
       ...(env ? { env } : {}),
     });
-    if (task.taskId) {
+    if (task.taskId && proc.pid) {
       registerWorker({ type: "worker", proc, name: workerName, cwd, taskId: task.taskId });
     }
 
-    // Guard against ENOENT and other spawn failures — without this handler
-    // Node.js would emit an uncaught error and crash the orchestrator.
-    // We also reset any in_progress task so it isn't stuck forever.
     proc.on("error", (err) => {
-      process.stderr.write(
-        `[pi-messenger] Failed to spawn worker "${executable}": ${err.message} (${err.code ?? "unknown"})\n`
-      );
-      // The "close" event fires right after "error" with exitCode null.
-      // We proactively remove live worker tracking here so it isn't stuck
-      // if the close handler fires before we can react.
-      if (task.taskId) {
-        removeLiveWorker(cwd, task.taskId);
-        unregisterWorker(cwd, task.taskId);
-      }
+      handleLaunchFailure(err as NodeJS.ErrnoException);
     });
-    let gracefulShutdownRequested = false;
-    let discoveredWorkerName: string | null = null;
-
-    let jsonlBuffer = "";
-    const events: PiEvent[] = [];
 
     proc.stdout?.on("data", (data) => {
       try {
@@ -319,14 +425,14 @@ async function runAgent(
       } catch {}
     });
 
-    let stderr = "";
     proc.stderr?.on("data", (data) => { stderr += data.toString(); });
 
     proc.on("close", (code) => {
-      if (task.taskId) {
-        removeLiveWorker(cwd, task.taskId);
-        unregisterWorker(cwd, task.taskId);
+      if (settled) {
+        cleanup();
+        return;
       }
+
       progress.status = code === 0 ? "completed" : "failed";
       progress.durationMs = Date.now() - startTime;
       if (stderr && code !== 0) progress.error = stderr;
@@ -337,24 +443,20 @@ async function runAgent(
       if (artifactPaths) {
         try {
           writeArtifact(artifactPaths.outputPath, fullOutput);
-          writeMetadata(artifactPaths.metadataPath, {
-            runId,
-            agent: task.agent,
-            index,
-            exitCode: code ?? 1,
-            durationMs: progress.durationMs,
-            tokens: progress.tokens,
-            truncated: truncation.truncated,
-            error: progress.error,
-          });
         } catch {}
       }
+      persistMetadata({
+        runId,
+        agent: task.agent,
+        index,
+        exitCode: code ?? 1,
+        durationMs: progress.durationMs,
+        tokens: progress.tokens,
+        truncated: truncation.truncated,
+        error: progress.error,
+      });
 
-      if (promptTmpDir) {
-        try { fs.rmSync(promptTmpDir, { recursive: true, force: true }); } catch {}
-      }
-
-      resolve({
+      finalize({
         agent: task.agent,
         exitCode: code ?? 1,
         output: truncation.text,
@@ -364,19 +466,8 @@ async function runAgent(
         taskId: task.taskId,
         wasGracefullyShutdown: gracefulShutdownRequested,
         error: progress.error,
-        artifactPaths: artifactPaths ? {
-          input: artifactPaths.inputPath,
-          output: artifactPaths.outputPath,
-          jsonl: artifactPaths.jsonlPath,
-          metadata: artifactPaths.metadataPath,
-        } : undefined,
+        artifactPaths: resultArtifactPaths,
       });
-
-      if (gracefulShutdownRequested && discoveredWorkerName && options.messengerDirs?.registry) {
-        try {
-          fs.unlinkSync(path.join(options.messengerDirs.registry, `${discoveredWorkerName}.json`));
-        } catch {}
-      }
     });
 
     // Handle abort signal

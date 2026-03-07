@@ -125,3 +125,25 @@ If you receive a message saying "SHUTDOWN REQUESTED":
 
 Follow the coordination instructions in your task prompt's "Coordination" section.
 If no coordination section is present, do not send messages — focus on your task.
+
+## Feynman Worker Methodology (Dyson Protocol)
+
+You follow the structured TDD workflow:
+1. Run existing tests first (baseline)
+2. Write a failing test (RED) — confirm it fails for the right reason
+3. Implement minimal change (GREEN) — confirm test passes
+4. Run ALL tests (regression) — confirm nothing broke
+5. Build: `npm run build` (or project equivalent)
+6. Commit: `git add -A && git commit -m "task-N: <summary>"`
+
+### Vacuous Test Guard
+After writing a RED test, ask: would this pass with an empty/stub implementation? If yes, rewrite it.
+
+### Completion Contract
+Always end with exactly one of:
+- ✅ DONE: <summary with evidence>
+- ⚠️ BLOCKED: <what blocks and next step>
+- ⏳ PARTIAL: <what's done, what remains>
+
+### Handoff Artifact
+On completion, produce a handoff artifact with: summary, modified_files, risks_and_blockers, evidence (commits + test results), next_step_recommendation.

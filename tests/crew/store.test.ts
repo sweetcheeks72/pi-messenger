@@ -63,6 +63,19 @@ describe("crew/store", () => {
   });
 
   describe("task CRUD", () => {
+    it("createTask initializes spawn_failure_count to 0 and incrementSpawnFailureCount persists", () => {
+      store.createPlan(cwd, "docs/PRD.md");
+
+      const task = store.createTask(cwd, "Task one", "Description one");
+
+      expect(task.spawn_failure_count).toBe(0);
+      expect(store.getTask(cwd, task.id)?.spawn_failure_count).toBe(0);
+
+      store.incrementSpawnFailureCount(cwd, task.id);
+
+      expect(store.getTask(cwd, task.id)?.spawn_failure_count).toBe(1);
+    });
+
     it("createTask assigns sequential IDs and creates .json/.md files", () => {
       store.createPlan(cwd, "docs/PRD.md");
 

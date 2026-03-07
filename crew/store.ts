@@ -187,6 +187,7 @@ export function createTask(
     created_at: now,
     updated_at: now,
     attempt_count: 0,
+    spawn_failure_count: 0,
   };
 
   writeJson(path.join(getTasksDir(cwd), `${id}.json`), task);
@@ -211,7 +212,15 @@ function normalizeTask(raw: Task): Task {
     ...raw,
     depends_on: Array.isArray(raw.depends_on) ? raw.depends_on : [],
     attempt_count: typeof raw.attempt_count === "number" ? raw.attempt_count : 0,
+    spawn_failure_count: typeof raw.spawn_failure_count === "number" ? raw.spawn_failure_count : 0,
   };
+}
+
+/** Atomically increment the spawn_failure_count for a task (persisted to disk). */
+export function incrementSpawnFailureCount(cwd: string, taskId: string): void {
+  const task = getTask(cwd, taskId);
+  if (!task) return;
+  updateTask(cwd, taskId, { spawn_failure_count: (task.spawn_failure_count ?? 0) + 1 });
 }
 
 export function getTask(cwd: string, taskId: string): Task | null {

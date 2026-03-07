@@ -6,7 +6,7 @@
  */
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { Dirs } from "../../lib.js";
+import { generateMemorableName, type Dirs } from "../../lib.js";
 import type { CrewParams, AppendEntryFn } from "../types.js";
 import { result } from "../utils/result.js";
 import { resolveModel, spawnAgents } from "../agents.js";
@@ -15,6 +15,7 @@ import { discoverCrewAgents } from "../utils/discover.js";
 import { buildWorkerPrompt } from "../prompt.js";
 import * as store from "../store.js";
 import { getCrewDir } from "../store.js";
+import { hasActiveWorker } from "../registry.js";
 import { autonomousState, isAutonomousForCwd, startAutonomous, stopAutonomous, addWaveResult, clampConcurrency } from "../state.js";
 import { getAvailableLobbyWorkers, assignTaskToLobbyWorker, cleanupUnassignedAliveFiles } from "../lobby.js";
 import { logFeedEvent } from "../../feed.js";
@@ -117,6 +118,11 @@ export async function execute(
     const task = readyTasks.find(t => !lobbyAssigned.has(t.id));
     if (!task) break;
 
+    const currentTask = store.getTask(cwd, task.id);
+    if (!currentTask || currentTask.status !== "todo" || hasActiveWorker(cwd, task.id)) {
+      continue;
+    }
+
     const others = readyTasks.filter(t => t.id !== task.id);
     const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others);
     store.updateTask(cwd, task.id, {
@@ -138,32 +144,65 @@ export async function execute(
 
   // Build prompts for remaining tasks — spawnAgents throttles via autonomousState.concurrency
   const remainingTasks = readyTasks.filter(t => !lobbyAssigned.has(t.id));
-  const workerTasks = remainingTasks.map(task => {
-    const taskModel = resolveModel(
-      task.model,
-      params.model,
-      config.models?.worker,
-    );
-    const others = readyTasks.filter(t => t.id !== task.id);
+  const pendingAssignments: Array<{
+    task: typeof remainingTasks[number];
+    workerName: string;
+    modelOverride: string | undefined;
+  }> = [];
+
+  for (const task of remainingTasks) {
+    const currentTask = store.getTask(cwd, task.id);
+    if (!currentTask || currentTask.status !== "todo" || hasActiveWorker(cwd, task.id)) continue;
+
+    const workerName = generateMemorableName();
+    const updatedTask = store.updateTask(cwd, task.id, {
+      status: "in_progress",
+      started_at: new Date().toISOString(),
+      base_commit: store.getBaseCommit(cwd),
+      assigned_to: workerName,
+      attempt_count: currentTask.attempt_count + 1,
+    });
+    if (!updatedTask) continue;
+
+    pendingAssignments.push({
+      task: currentTask,
+      workerName,
+      modelOverride: resolveModel(
+        task.model,
+        params.model,
+        config.models?.worker,
+      ),
+    });
+    store.appendTaskProgress(cwd, task.id, "system", `Assigned to ${workerName} via crew-worker (attempt ${currentTask.attempt_count + 1})`);
+  }
+
+  const workerTasks = pendingAssignments.map(({ task, workerName, modelOverride }) => {
+    const others = pendingAssignments.map(assignment => assignment.task).filter(other => other.id !== task.id);
     const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others);
-    store.appendTaskProgress(cwd, task.id, "system", `Assigned to crew-worker (attempt ${task.attempt_count + 1})`);
 
     return {
       agent: "crew-worker",
       task: prompt,
       taskId: task.id,
-      modelOverride: taskModel,
+      modelOverride,
+      workerName,
     };
   });
 
-  const workerResults = await spawnAgents(
-    workerTasks,
-    cwd,
-    {
-      signal,
-      messengerDirs: { registry: dirs.registry, inbox: dirs.inbox },
-    }
-  );
+  const attemptedTaskIds = workerTasks
+    .map(workerTask => workerTask.taskId)
+    .filter((taskId): taskId is string => !!taskId);
+
+  const workerResults = workerTasks.length > 0
+    ? await spawnAgents(
+        workerTasks,
+        cwd,
+        {
+          signal,
+          messengerDirs: { registry: dirs.registry, inbox: dirs.inbox },
+        }
+      )
+    : [];
 
   // Process results
   const succeeded: string[] = [];
@@ -230,7 +269,7 @@ export async function execute(
   if (autonomous) {
     addWaveResult({
       waveNumber: currentWave,
-      tasksAttempted: remainingTasks.map(t => t.id),
+      tasksAttempted: attemptedTaskIds,
       succeeded,
       failed,
       blocked,
@@ -302,7 +341,7 @@ export async function execute(
   const text = `# Work Wave ${currentWave}
 
 **PRD:** ${store.getPlanLabel(plan)}
-**Tasks attempted:** ${remainingTasks.length}${lobbyAssigned.size > 0 ? ` (+${lobbyAssigned.size} lobby)` : ""}
+**Tasks attempted:** ${attemptedTaskIds.length}${lobbyAssigned.size > 0 ? ` (+${lobbyAssigned.size} lobby)` : ""}
 **Progress:** ${progress}
 ${statusText}${lobbyText}${nextText}
 
@@ -312,7 +351,7 @@ ${continueText}`;
     mode: "work",
     prd: plan.prd,
     wave: currentWave,
-    attempted: remainingTasks.map(t => t.id),
+    attempted: attemptedTaskIds,
     succeeded,
     failed,
     blocked,

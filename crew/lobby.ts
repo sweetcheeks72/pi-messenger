@@ -13,7 +13,12 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { generateMemorableName } from "../lib.js";
-import { resolveThinking, modelHasThinkingSuffix, pushModelArgs } from "./agents.js";
+import {
+  resolveThinking,
+  modelHasThinkingSuffix,
+  pushModelArgs,
+  resolveExecutable,
+} from "./agents.js";
 import { discoverCrewAgents } from "./utils/discover.js";
 import { loadCrewConfig, type CrewConfig } from "./utils/config.js";
 import {
@@ -109,8 +114,7 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
   const envOverrides = config.work.env ?? {};
   const env = { ...process.env, ...envOverrides, PI_AGENT_NAME: name, PI_CREW_WORKER: "1", PI_LOBBY_ID: id };
 
-  // Executable resolution: env var > crew config > default "pi"
-  const executable = process.env.PI_CREW_EXECUTABLE ?? config.work.executable ?? "pi";
+  const executable = resolveExecutable(config);
 
   const proc = spawn(executable, args, {
     cwd,
@@ -140,6 +144,8 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
 
   const progress = createProgress("crew-worker");
 
+  let spawnFailed = false;
+  let spawnFailureDetails: string | null = null;
   let jsonlBuffer = "";
   proc.stdout?.on("data", (data) => {
     try {
@@ -173,12 +179,25 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
   // Guard against ENOENT and other spawn failures — without this handler
   // Node.js would emit an uncaught error and crash the orchestrator.
   proc.on("error", (err: NodeJS.ErrnoException) => {
-    // Log to stderr but do not rethrow; the close event fires immediately
-    // after the error event and the existing close handler resets the task.
-    process.stderr.write(
-      `[pi-messenger] Failed to spawn worker "${executable}": ${err.message} (${err.code ?? "unknown"})
-`
-    );
+    const failureDetails = `Failed to spawn worker "${executable}": ${err.message} (${err.code ?? "unknown"})`;
+    spawnFailed = true;
+    spawnFailureDetails = failureDetails;
+    process.stderr.write(`[pi-messenger] ${failureDetails}\n`);
+
+    if (worker.assignedTaskId) {
+      const task = store.getTask(cwd, worker.assignedTaskId);
+      store.incrementSpawnFailureCount(cwd, worker.assignedTaskId);
+      store.appendTaskProgress(
+        cwd,
+        worker.assignedTaskId,
+        "system",
+        `Lobby worker ${worker.name} spawn failed: ${failureDetails}`
+      );
+      if (task && task.status === "in_progress" && task.assigned_to === worker.name) {
+        store.updateTask(cwd, worker.assignedTaskId, { status: "todo", assigned_to: undefined });
+        logFeedEvent(cwd, worker.name, "task.reset", worker.assignedTaskId, `Spawn failed: ${failureDetails}`);
+      }
+    }
   });
 
   proc.on("close", (exitCode) => {
@@ -192,21 +211,23 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
       try { fs.unlinkSync(worker.aliveFile); } catch {}
     }
     if (worker.assignedTaskId) {
-      const task = store.getTask(cwd, worker.assignedTaskId);
-      if (task && task.status === "in_progress" && task.assigned_to === worker.name) {
-        const config = loadCrewConfig(store.getCrewDir(cwd));
-        if (task.attempt_count >= config.work.maxAttemptsPerTask) {
-          store.updateTask(cwd, worker.assignedTaskId, {
-            status: "blocked",
-            blocked_reason: `Max attempts (${config.work.maxAttemptsPerTask}) reached`,
-            assigned_to: undefined,
-          });
-          logFeedEvent(cwd, worker.name, "task.block", worker.assignedTaskId, `Max attempts reached`);
-        } else {
-          store.updateTask(cwd, worker.assignedTaskId, { status: "todo", assigned_to: undefined });
-          store.appendTaskProgress(cwd, worker.assignedTaskId, "system",
-            `Lobby worker ${worker.name} exited (code ${exitCode ?? "unknown"}), reset to todo`);
-          logFeedEvent(cwd, worker.name, "task.reset", worker.assignedTaskId, "worker exited");
+      if (!spawnFailed) {
+        const task = store.getTask(cwd, worker.assignedTaskId);
+        if (task && task.status === "in_progress" && task.assigned_to === worker.name) {
+          const config = loadCrewConfig(store.getCrewDir(cwd));
+          if (task.attempt_count >= config.work.maxAttemptsPerTask) {
+            store.updateTask(cwd, worker.assignedTaskId, {
+              status: "blocked",
+              blocked_reason: `Max attempts (${config.work.maxAttemptsPerTask}) reached`,
+              assigned_to: undefined,
+            });
+            logFeedEvent(cwd, worker.name, "task.block", worker.assignedTaskId, `Max attempts reached`);
+          } else {
+            store.updateTask(cwd, worker.assignedTaskId, { status: "todo", assigned_to: undefined });
+            store.appendTaskProgress(cwd, worker.assignedTaskId, "system",
+              `Lobby worker ${worker.name} exited (code ${exitCode ?? "unknown"}), reset to todo`);
+            logFeedEvent(cwd, worker.name, "task.reset", worker.assignedTaskId, "worker exited");
+          }
         }
       }
     } else {

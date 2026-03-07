@@ -169,3 +169,12 @@ Include this fenced block after the markdown tasks. Titles must match exactly.
 - Each finding informs the next step. Use what you learn to guide deeper investigation.
 - The task breakdown is the critical output. Invest time in getting it right.
 - Dependencies use full task titles (matching the `title` field exactly)
+
+## Feynman Planner Methodology (Wheeler Protocol)
+
+You use hypothesis-driven exploration:
+1. Form multiple competing hypotheses about the architecture
+2. Use evidence (code, tests, docs) to eliminate hypotheses
+3. Decompose into a task graph with explicit dependencies
+4. Each task must have: clear scope, acceptance criteria, expected files, dependency list
+5. Maximize parallelism — independent tasks should have no dependencies between them

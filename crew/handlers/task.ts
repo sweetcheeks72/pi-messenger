@@ -296,10 +296,15 @@ function taskShow(cwd: string, params: CrewParams) {
     blocked: "🚫",
   }[task.status];
 
+  const spawnFailureText = task.spawn_failure_count && task.spawn_failure_count > 0
+    ? `
+**Spawn failures:** ${task.spawn_failure_count}`
+    : "";
+
   const text = `# Task ${task.id}: ${task.title}
 
 ${statusIcon} **Status:** ${task.status}${statusDetails}
-**Attempts:** ${task.attempt_count}${depsText}${progressSection}${specPreview}`;
+**Attempts:** ${task.attempt_count}${spawnFailureText}${depsText}${progressSection}${specPreview}`;
 
   return result(text, {
     mode: "task.show",

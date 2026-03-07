@@ -3,15 +3,18 @@
 ## [Unreleased]
 
 ### Fixed
-- Orchestrator no longer crashes when spawning `pi` fails with `ENOENT` — an `error` event handler is
-  now registered on every spawned worker process, writing a diagnostic to stderr and allowing the
-  existing close-handler task-recovery path to run normally.
+- Orchestrator no longer crashes when worker launch fails with `ENOENT` or another spawn error. Task
+  workers now register an `error` handler plus dedicated launch-failure recovery that writes
+  diagnostics, persists spawn-failure metadata, increments `spawn_failure_count`, and resets the
+  preassigned task back to `todo` when appropriate. Lobby workers also register an `error` handler,
+  log diagnostics, and increment/log assigned-task spawn failures instead of crashing the process.
 
 ### Added
-- `work.executable` crew config option: override the executable used to spawn workers (default `"pi"`).
-  Useful for Helios environments where `pi` lives under a different name or path.
-- `PI_CREW_EXECUTABLE` environment variable: takes priority over `work.executable` for per-invocation
-  overrides without editing config files.
+- `work.executable` crew config option: override the executable used to spawn workers. Resolution
+  order is `PI_CREW_EXECUTABLE` → `work.executable` → `which pi` → `pi`.
+- `PI_CREW_EXECUTABLE` environment variable: highest-priority per-invocation override for the worker
+  executable without editing config files.
+
 ## [0.12.1] - 2026-02-22
 
 ### Fixed

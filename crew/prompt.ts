@@ -26,6 +26,7 @@ export function buildWorkerPrompt(
 **Task Title:** ${task.title}
 **PRD:** ${prdPath}
 ${task.attempt_count >= 1 ? `**Attempt:** ${task.attempt_count + 1} (retry after previous attempt)` : ""}
+${task.spawn_failure_count && task.spawn_failure_count > 0 ? `**Spawn failures:** ${task.spawn_failure_count}` : ""}
 
 ## Your Mission
 

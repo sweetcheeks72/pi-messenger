@@ -10,12 +10,15 @@ import * as path from "node:path";
 import { EventEmitter } from "node:events";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { spawnAgents } from "../../crew/agents.js";
+import * as store from "../../crew/store.js";
 import { createTempCrewDirs, type TempCrewDirs } from "../helpers/temp-dirs.js";
 
 const spawnMock = vi.hoisted(() => vi.fn());
+const execSyncMock = vi.hoisted(() => vi.fn());
 
 vi.mock("node:child_process", () => ({
   spawn: spawnMock,
+  execSync: execSyncMock,
 }));
 
 type MockProcess = EventEmitter & {
@@ -66,6 +69,9 @@ describe("crew/agents — executable resolution & ENOENT guard", () => {
     dirs = createTempCrewDirs();
     spawnMock.mockReset();
     spawnMock.mockImplementation(() => createMockProcess(0));
+    execSyncMock.mockReset();
+    // Simulate no `which` result by default
+    execSyncMock.mockImplementation(() => { throw new Error("which: pi not found"); });
     // Ensure no leftover env var bleeds across tests
     delete process.env.PI_CREW_EXECUTABLE;
   });
@@ -79,6 +85,16 @@ describe("crew/agents — executable resolution & ENOENT guard", () => {
 
     expect(spawnMock).toHaveBeenCalledTimes(1);
     expect(spawnMock.mock.calls[0][0]).toBe("pi");
+  });
+
+  it("uses which pi path when available via shared resolver fallback", async () => {
+    writeWorkerAgent(dirs.cwd);
+    execSyncMock.mockReturnValueOnce("/which/pi/path\n");
+
+    await spawnAgents([{ agent: "crew-worker", task: "do work", taskId: "task-2" }], dirs.cwd);
+
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock.mock.calls[0][0]).toBe("/which/pi/path");
   });
 
   it("uses PI_CREW_EXECUTABLE env var as the spawned executable", async () => {
@@ -181,6 +197,59 @@ describe("crew/agents — executable resolution & ENOENT guard", () => {
 
     expect(capturedProc).not.toBeNull();
     expect((capturedProc as MockProcess).listenerCount("error")).toBeGreaterThan(0);
+  });
+
+  it("spawn failure persists metadata, increments spawn_failure_count, and resets the preassigned task", async () => {
+    writeWorkerAgent(dirs.cwd);
+    store.createPlan(dirs.cwd, "docs/PRD.md");
+    const task = store.createTask(dirs.cwd, "Task two", "Desc two");
+    store.updateTask(dirs.cwd, task.id, {
+      status: "in_progress",
+      assigned_to: "LaunchWorker",
+      started_at: new Date().toISOString(),
+      base_commit: "abc12345",
+    });
+
+    spawnMock.mockImplementationOnce(() => {
+      const proc = new EventEmitter() as MockProcess;
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      proc.killed = false;
+      proc.exitCode = null;
+      proc.pid = 77777;
+      proc.kill = vi.fn();
+      queueMicrotask(() => {
+        proc.emit("error", Object.assign(new Error("spawn pi ENOENT"), { code: "ENOENT", syscall: "spawn", path: "pi" }));
+        proc.exitCode = 1;
+        proc.emit("close", 1);
+      });
+      return proc;
+    });
+
+    const results = await spawnAgents(
+      [{ agent: "crew-worker", task: "do work", taskId: task.id, workerName: "LaunchWorker" }],
+      dirs.cwd,
+    );
+
+    expect(results).toHaveLength(1);
+    expect(results[0].exitCode).toBe(1);
+    expect(results[0].error).toContain("ENOENT");
+    expect(results[0].progress.error).toContain("ENOENT");
+    expect(results[0].artifactPaths?.metadata).toBeTruthy();
+
+    const metadata = JSON.parse(fs.readFileSync(results[0].artifactPaths!.metadata, "utf-8"));
+    expect(metadata.error).toContain("ENOENT");
+    expect(metadata.spawnFailure.code).toBe("ENOENT");
+    expect(metadata.spawnFailure.workerName).toBe("LaunchWorker");
+
+    const reloaded = store.getTask(dirs.cwd, task.id);
+    expect(reloaded?.status).toBe("todo");
+    expect(reloaded?.assigned_to).toBeUndefined();
+    expect(reloaded?.started_at).toBeUndefined();
+    expect(reloaded?.base_commit).toBeUndefined();
+    expect(reloaded?.spawn_failure_count).toBe(1);
+
+    expect(store.getTaskProgress(dirs.cwd, task.id)).toContain("Worker launch failed for LaunchWorker");
   });
 
   it("spawn failure results in a failed AgentResult (not a crash)", async () => {

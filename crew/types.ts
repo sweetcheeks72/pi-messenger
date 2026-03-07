@@ -50,6 +50,7 @@ export interface Task {
   evidence?: TaskEvidence;       // Evidence from task.done
   blocked_reason?: string;       // Reason from task.block
   attempt_count: number;         // How many times attempted (for auto-block)
+  spawn_failure_count?: number;  // How many times the spawned process failed to start (ENOENT/EACCES/etc.)
   last_review?: ReviewFeedback;  // Feedback from last review (for retry)
 }
 
@@ -145,6 +146,7 @@ export interface AgentTask {
   taskId?: string;
   modelOverride?: string;
   maxOutput?: MaxOutputConfig;
+  workerName?: string;           // pre-assigned worker name for duplicate dispatch prevention
 }
 
 export interface AgentResult {

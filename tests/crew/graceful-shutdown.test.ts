@@ -175,9 +175,10 @@ describe("crew/graceful shutdown", () => {
     const workHandler = await import("../../crew/handlers/work.js");
 
     writeWorkerAgent(dirs.cwd);
+    fs.writeFileSync(path.join(dirs.crewDir, "config.json"), JSON.stringify({ dependencies: "strict" }));
     store.createPlan(dirs.cwd, "docs/PRD.md");
     const t1 = store.createTask(dirs.cwd, "Task one", "Desc one");
-    const t2 = store.createTask(dirs.cwd, "Task two", "Desc two");
+    const t2 = store.createTask(dirs.cwd, "Task two", "Desc two", [t1.id]);
 
     let call = 0;
     vi.spyOn(agents, "spawnAgents").mockImplementation(async () => {
@@ -297,6 +298,57 @@ describe("crew/graceful shutdown", () => {
     expect(state.autonomousState.stopReason).toBe("manual");
     expect(appendEntry).toHaveBeenCalledWith("crew-state", state.autonomousState);
     expect(response.content[0].text).toContain("Autonomous mode stopped (cancelled).");
+  });
+
+  it("preassigns workerName before spawn and ignores stale non-todo tasks", async () => {
+    const store = await import("../../crew/store.js");
+    const agents = await import("../../crew/agents.js");
+    const workHandler = await import("../../crew/handlers/work.js");
+
+    writeWorkerAgent(dirs.cwd);
+    store.createPlan(dirs.cwd, "docs/PRD.md");
+    const t1 = store.createTask(dirs.cwd, "Task one", "Desc one");
+    const t2 = store.createTask(dirs.cwd, "Task two", "Desc two");
+
+    const realGetTask = store.getTask.bind(store);
+    const realUpdateTask = store.updateTask.bind(store);
+    let staleInjected = false;
+    vi.spyOn(store, "getTask").mockImplementation((cwdArg: string, taskId: string) => {
+      if (!staleInjected && taskId === t2.id) {
+        const current = realGetTask(cwdArg, taskId);
+        if (current?.status === "todo") {
+          staleInjected = true;
+          realUpdateTask(cwdArg, taskId, { status: "in_progress", assigned_to: "OtherWorker" });
+        }
+      }
+      return realGetTask(cwdArg, taskId);
+    });
+
+    const spawnSpy = vi.spyOn(agents, "spawnAgents").mockImplementation(async (workerTasks) => {
+      expect(workerTasks).toHaveLength(1);
+      const [workerTask] = workerTasks as Array<{ taskId?: string; workerName?: string }>;
+      expect(workerTask.taskId).toBe(t1.id);
+      expect(workerTask.workerName).toBeTruthy();
+
+      const preassigned = realGetTask(dirs.cwd, t1.id);
+      expect(preassigned?.status).toBe("in_progress");
+      expect(preassigned?.assigned_to).toBe(workerTask.workerName);
+      expect(preassigned?.attempt_count).toBe(1);
+
+      return [];
+    });
+
+    const response = await workHandler.execute(
+      { action: "work", concurrency: 2 },
+      createDirs(dirs.cwd),
+      createMockContext(dirs.cwd),
+      () => {},
+    );
+
+    expect(spawnSpy).toHaveBeenCalledTimes(1);
+    expect(response.details.attempted).toEqual([t1.id]);
+    expect(realGetTask(dirs.cwd, t2.id)?.status).toBe("in_progress");
+    expect(realGetTask(dirs.cwd, t2.id)?.assigned_to).toBe("OtherWorker");
   });
 
   it("clamps fractional concurrency and passes all ready tasks to spawnAgents", async () => {
