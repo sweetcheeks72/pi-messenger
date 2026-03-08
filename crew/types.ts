@@ -19,13 +19,22 @@ export interface Plan {
   updated_at: string;            // ISO timestamp
   task_count: number;            // Total tasks
   completed_count: number;       // Completed tasks
+
+  /** NEW: All source specs for this plan (multi-spec support) */
+  sources?: SpecSource[];
 }
 
 // =============================================================================
 // Task Types
 // =============================================================================
 
-export type TaskStatus = "todo" | "in_progress" | "done" | "blocked";
+export type TaskStatus =
+  | "todo"
+  | "assigned"       // worker allocated, not yet spawned
+  | "starting"       // process spawned, awaiting first heartbeat
+  | "in_progress"    // heartbeat received, actively working
+  | "done"
+  | "blocked";
 
 export interface TaskEvidence {
   commits?: string[];            // Commit SHAs
@@ -51,6 +60,18 @@ export interface Task {
   evidence?: TaskEvidence;       // Evidence from task.done
   blocked_reason?: string;       // Reason from task.block
   attempt_count: number;         // How many times attempted (for auto-block)
+
+  /** NEW: Which spec produced this task (for multi-spec pools) */
+  source_spec_id?: string;
+
+  /** NEW: ISO timestamp when task was assigned to a worker */
+  assigned_at?: string;
+
+  /** NEW: Worker ID holding current lease */
+  worker_id?: string;
+
+  /** NEW: How many times this task has been reset/retried */
+  retry_count?: number;
   spawn_failure_count?: number;  // How many times the spawned process failed to start (ENOENT/EACCES/etc.)
   last_review?: ReviewFeedback;  // Feedback from last review (for retry)
 }
@@ -173,3 +194,57 @@ export interface AgentResult {
 // =============================================================================
 
 export type AppendEntryFn = (type: string, data: unknown) => void;
+
+// =============================================================================
+// Worker Lease Types (durable lease store)
+// =============================================================================
+
+export type WorkerLeaseStatus = "assigned" | "starting" | "active" | "completed" | "failed";
+
+export interface WorkerLease {
+  /** Matches Task.id */
+  taskId: string;
+  /** Unique worker identifier: crew-worker-{shortHash} */
+  workerId: string;
+  /** OS PID of spawned pi process */
+  pid: number | null;
+  /** ISO 8601 — when task was assigned */
+  assignedAt: string;
+  /** ISO 8601 — when process was spawned */
+  spawnedAt: string | null;
+  /** ISO 8601 — last heartbeat (updated every 30 s by worker) */
+  heartbeatAt: string | null;
+  /** ISO 8601 — first heartbeat received */
+  startedAt: string | null;
+  /** Current lease status */
+  status: WorkerLeaseStatus;
+  /** Model used for this worker (provider/model-id) */
+  model: string | null;
+  /** How many consecutive restart attempts */
+  restartCount: number;
+}
+
+export interface WorkerLeaseStore {
+  version: "1";
+  updatedAt: string;
+  leases: WorkerLease[];
+}
+
+// =============================================================================
+// Multi-Spec Plan Types
+// =============================================================================
+
+export type SpecSourceType = "prd" | "prompt" | "github_issue" | "user_request" | "inline";
+
+export interface SpecSource {
+  /** e.g. "spec-1", "spec-2" */
+  id: string;
+  type: SpecSourceType;
+  /** Relative or absolute path to spec file */
+  path?: string;
+  /** Inline spec content (for prompt/inline types) */
+  content?: string;
+  created_at: string;
+  /** Optional display title */
+  title?: string;
+}
