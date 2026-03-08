@@ -5,6 +5,7 @@
 import type { Component, Focusable, TUI } from "@mariozechner/pi-tui";
 import { matchesKey, visibleWidth } from "@mariozechner/pi-tui";
 import type { Theme } from "@mariozechner/pi-coding-agent";
+import type { MonitorRegistry } from "./src/monitor/registry.js";
 import {
   extractFolder,
   formatDuration,
@@ -66,6 +67,7 @@ export class MessengerOverlay implements Component, Focusable {
   private completionDismissed = false;
   private wasPlanning: boolean;
   private prevInProgressCount = 0;
+  private registry: MonitorRegistry | undefined;
 
   constructor(
     private tui: TUI,
@@ -74,8 +76,10 @@ export class MessengerOverlay implements Component, Focusable {
     private dirs: Dirs,
     private done: (snapshot?: string) => void,
     private callbacks: OverlayCallbacks,
+    registry?: MonitorRegistry,
   ) {
     this.cwd = process.cwd();
+    this.registry = registry;
     const cfg = loadConfig(this.cwd);
     this.stuckThresholdMs = cfg.stuckThreshold * 1000;
 

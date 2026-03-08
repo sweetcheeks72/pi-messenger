@@ -44,6 +44,7 @@ import { loadConfig, matchesAutoRegisterPath, type MessengerConfig } from "./con
 import { executeCrewAction } from "./crew/index.js";
 import { logFeedEvent, pruneFeed } from "./feed.js";
 import type { CrewParams } from "./crew/types.js";
+import { createMonitorRegistry, type MonitorRegistry } from "./src/monitor/registry.js";
 import {
   autonomousState,
   clearPlanningState,
@@ -69,6 +70,7 @@ import { shutdownLobbyWorkers } from "./crew/lobby.js";
 let overlayTui: TUI | null = null;
 let overlayHandle: OverlayHandle | null = null;
 let overlayOpening = false;
+let monitorRegistry: MonitorRegistry | undefined;
 
 export default function piMessengerExtension(pi: ExtensionAPI) {
   // One-time migration: remove stale crew agents from shared ~/.pi/agent/agents/
@@ -509,7 +511,7 @@ Usage (action-based API - preferred):
       const snapshot = await ctx.ui.custom<string | undefined>(
         (tui, theme, _keybindings, done) => {
           overlayTui = tui;
-          return new MessengerOverlay(tui, theme, state, dirs, done, callbacks);
+          return new MessengerOverlay(tui, theme, state, dirs, done, callbacks, monitorRegistry);
         },
         {
           overlay: true,
@@ -755,6 +757,7 @@ Usage (action-based API - preferred):
 
   pi.on("session_start", async (_event, ctx) => {
     latestCtx = ctx;
+    monitorRegistry = createMonitorRegistry();
     startStatusHeartbeat();
     for (const entry of ctx.sessionManager.getEntries()) {
       if (entry.type === "custom" && entry.customType === "crew-state") {
@@ -840,7 +843,7 @@ Usage (action-based API - preferred):
     ctx.ui.custom<string | undefined>(
       (tui, theme, _keybindings, done) => {
         overlayTui = tui;
-        return new MessengerOverlay(tui, theme, state, dirs, done, callbacks);
+        return new MessengerOverlay(tui, theme, state, dirs, done, callbacks, monitorRegistry);
       },
       {
         overlay: true,
@@ -1011,6 +1014,8 @@ Usage (action-based API - preferred):
   });
 
   pi.on("session_shutdown", async () => {
+    monitorRegistry?.dispose();
+    monitorRegistry = undefined;
     shutdownLobbyWorkers(process.cwd());
     shutdownAllWorkers();
     stopStatusHeartbeat();
