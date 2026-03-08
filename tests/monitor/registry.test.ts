@@ -97,4 +97,133 @@ describe("MonitorRegistry", () => {
     const metricsAfter = registry.aggregator.computeMetrics(sessionId);
     expect(metricsAfter.totalEvents).toBe(metricsBefore.totalEvents);
   });
+
+  it("applies custom health thresholds from crew config", () => {
+    const registry = createMonitorRegistry({
+      healthConfig: {
+        staleAfterMs: 10_000,
+        stuckAfterMs: 60_000,
+        errorRateThreshold: 0.3,
+        pollIntervalMs: 2_000,
+      },
+    });
+
+    // pollIntervalMs is exposed on the registry
+    expect(registry.pollIntervalMs).toBe(2_000);
+
+    // Verify thresholds were applied: a session stale for 15s should be degraded
+    // (custom staleAfterMs=10000, default would be 30000)
+    const sessionId = registry.lifecycle.start({
+      name: "threshold-test-session",
+      cwd: "/tmp/registry",
+      model: "claude-test",
+      agent: "DarkNova",
+      taskId: "task-7",
+    });
+
+    // Emit an event to initialise signal history with a past timestamp
+    const staleTime = Date.now() - 15_000; // 15 seconds ago — past custom 10s threshold
+    registry["healthMonitor"]["signalHistory"].set(sessionId, {
+      lastHeartbeatAt: staleTime,
+      lastOutputAt: staleTime,
+      lastToolActivityAt: staleTime,
+      waiting: false,
+      waitingReason: undefined,
+      waitingAt: undefined,
+      retryCount: 0,
+    });
+
+    const status = registry.healthMonitor.checkHealth(sessionId);
+    expect(status).toBe("degraded");
+
+    registry.dispose();
+  });
+
+  it("falls back to defaults for invalid health config values", () => {
+    const registry = createMonitorRegistry({
+      healthConfig: {
+        staleAfterMs: -1,      // invalid — negative
+        stuckAfterMs: NaN,     // invalid — not finite
+        errorRateThreshold: 2, // invalid — > 1
+        pollIntervalMs: 0,     // invalid — not positive
+      },
+    });
+
+    expect(registry.pollIntervalMs).toBe(5_000);
+
+    // With default staleAfterMs=30000, a session stale for 15s should be healthy
+    const sessionId = registry.lifecycle.start({
+      name: "fallback-defaults-session",
+      cwd: "/tmp/registry",
+      model: "claude-test",
+      agent: "DarkNova",
+      taskId: "task-7",
+    });
+
+    const staleTime = Date.now() - 15_000;
+    registry["healthMonitor"]["signalHistory"].set(sessionId, {
+      lastHeartbeatAt: staleTime,
+      lastOutputAt: staleTime,
+      lastToolActivityAt: staleTime,
+      waiting: false,
+      waitingReason: undefined,
+      waitingAt: undefined,
+      retryCount: 0,
+    });
+
+    const status = registry.healthMonitor.checkHealth(sessionId);
+    expect(status).toBe("healthy");
+
+    registry.dispose();
+  });
+
+  it("reads health config from a crew config JSON file", async () => {
+    const { tmpdir } = await import("node:os");
+    const { writeFileSync, mkdirSync, rmSync } = await import("node:fs");
+    const { join } = await import("node:path");
+
+    const dir = join(tmpdir(), `registry-test-${Date.now()}`);
+    const configPath = join(dir, "config.json");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        health: {
+          staleAfterMs: 8_000,
+          stuckAfterMs: 50_000,
+          errorRateThreshold: 0.25,
+          pollIntervalMs: 1_500,
+        },
+      }),
+    );
+
+    const registry = createMonitorRegistry({ crewConfigPath: configPath });
+    expect(registry.pollIntervalMs).toBe(1_500);
+
+    const sessionId = registry.lifecycle.start({
+      name: "file-config-session",
+      cwd: "/tmp/registry",
+      model: "claude-test",
+      agent: "DarkNova",
+      taskId: "task-7",
+    });
+
+    // Session stale for 10s — past custom 8s threshold → degraded
+    const staleTime = Date.now() - 10_000;
+    registry["healthMonitor"]["signalHistory"].set(sessionId, {
+      lastHeartbeatAt: staleTime,
+      lastOutputAt: staleTime,
+      lastToolActivityAt: staleTime,
+      waiting: false,
+      waitingReason: undefined,
+      waitingAt: undefined,
+      retryCount: 0,
+    });
+
+    const status = registry.healthMonitor.checkHealth(sessionId);
+    expect(status).toBe("degraded");
+
+    registry.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
