@@ -128,20 +128,6 @@ export class SessionStore {
   }
 
   /**
-   * Append a projected session history entry without touching lifecycle status.
-   */
-  appendEvent(id: string, event: SessionHistoryEntry): SessionState {
-    const existing = this.sessions.get(id);
-    if (!existing) {
-      throw new Error(`Session not found: ${id}`);
-    }
-
-    return this.update(id, {
-      events: [...existing.events, event],
-    });
-  }
-
-  /**
    * Refresh live metrics for a session from a computed snapshot.
    */
   refreshMetrics(id: string, metrics: Partial<SessionMetrics>): SessionState {

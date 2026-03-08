@@ -54,7 +54,7 @@ export class SessionLifecycleManager {
       id: randomUUID(),
       type: "session.start",
       sessionId: id,
-      timestamp: Date.now(),
+      timestamp: new Date(startedAt).getTime(),
       sequence: this.nextSequence(id),
       payload: {
         type: "session.start",

@@ -11,6 +11,7 @@ import { SessionReplayer } from "./replay/replayer.js";
 import { SessionExporter } from "./export/exporter.js";
 import { SessionFeedSubscriber } from "./feed/subscriber.js";
 import type { HealthThresholds } from "./health/types.js";
+import type { SessionHistoryEntry } from "./types/session.js";
 
 // ─── Health config defaults ───────────────────────────────────────────────────
 
@@ -92,14 +93,51 @@ function resolveHealthConfig(raw: CrewHealthConfig): {
 } {
   return {
     thresholds: {
-      staleAfterMs: isPositiveFinite(raw.staleAfterMs) ? raw.staleAfterMs! : DEFAULT_STALE_AFTER_MS,
-      stuckAfterMs: isPositiveFinite(raw.stuckAfterMs) ? raw.stuckAfterMs! : DEFAULT_STUCK_AFTER_MS,
+      staleAfterMs: isPositiveFinite(raw.staleAfterMs) ? raw.staleAfterMs : DEFAULT_STALE_AFTER_MS,
+      stuckAfterMs: isPositiveFinite(raw.stuckAfterMs) ? raw.stuckAfterMs : DEFAULT_STUCK_AFTER_MS,
       errorRateThreshold: isValidErrorRate(raw.errorRateThreshold)
-        ? raw.errorRateThreshold!
+        ? raw.errorRateThreshold
         : DEFAULT_ERROR_RATE_THRESHOLD,
     },
-    pollIntervalMs: isPositiveFinite(raw.pollIntervalMs) ? raw.pollIntervalMs! : DEFAULT_POLL_INTERVAL_MS,
+    pollIntervalMs: isPositiveFinite(raw.pollIntervalMs) ? raw.pollIntervalMs : DEFAULT_POLL_INTERVAL_MS,
   };
+}
+
+function projectHistoryEntry(event: SessionEvent): SessionHistoryEntry {
+  return {
+    type: event.type,
+    timestamp: new Date(event.timestamp).toISOString(),
+    data: event.payload,
+  };
+}
+
+function projectStoreMetrics(event: SessionEvent, aggregator: SessionMetricsAggregator) {
+  const metrics = aggregator.computeMetrics(event.sessionId);
+  return {
+    duration: metrics.activeDurationMs,
+    eventCount: metrics.totalEvents,
+    errorCount: metrics.errorCount,
+    toolCalls: metrics.toolCalls,
+  };
+}
+
+function exportPayload(entry: SessionHistoryEntry): SessionEvent["payload"] {
+  const data = entry.data;
+  if (data && typeof data === "object" && (data as { type?: unknown }).type === entry.type) {
+    return data as SessionEvent["payload"];
+  }
+  return { type: entry.type } as SessionEvent["payload"];
+}
+
+function toStoreBackedSessionEvents(sessionId: string, history: SessionHistoryEntry[]): SessionEvent[] {
+  return history.map((entry, index) => ({
+    id: `${sessionId}:${index}`,
+    type: entry.type as SessionEvent["type"],
+    sessionId,
+    timestamp: Date.parse(entry.timestamp),
+    sequence: index,
+    payload: exportPayload(entry),
+  }));
 }
 
 // ─── MonitorRegistry ─────────────────────────────────────────────────────────
@@ -119,6 +157,7 @@ export class MonitorRegistry {
   readonly pollIntervalMs: number;
 
   private disposed = false;
+  private emitterProjectionUnsubscribe: (() => void) | null = null;
 
   constructor(options?: MonitorRegistryOptions) {
     this.store = new SessionStore();
@@ -130,10 +169,18 @@ export class MonitorRegistry {
     this.replayer = new SessionReplayer(this.emitter, this.aggregator);
     this.exporter = new SessionExporter(
       (id) => this.store.get(id),
-      (id) => this.emitter.getHistory().filter((event: SessionEvent) => event.sessionId === id),
+      (id) => toStoreBackedSessionEvents(id, this.store.get(id)?.events ?? []),
     );
     this.feedSubscriber = new SessionFeedSubscriber(this.emitter);
     this.feedSubscriber.subscribe();
+    this.emitterProjectionUnsubscribe = this.emitter.subscribe((event) => {
+      if (!this.store.get(event.sessionId)) {
+        return;
+      }
+
+      this.store.appendHistoryEvent(event.sessionId, projectHistoryEntry(event));
+      this.store.refreshMetrics(event.sessionId, projectStoreMetrics(event, this.aggregator));
+    });
 
     // Apply health thresholds from config
     const rawHealthConfig =
@@ -157,6 +204,8 @@ export class MonitorRegistry {
     this.disposed = true;
     this.healthMonitor.stop();
     this.feedSubscriber.unsubscribe();
+    this.emitterProjectionUnsubscribe?.();
+    this.emitterProjectionUnsubscribe = null;
     this.aggregator.destroy();
   }
 }
