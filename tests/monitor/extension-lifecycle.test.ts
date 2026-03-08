@@ -71,7 +71,7 @@ describe("MonitorRegistry extension lifecycle wiring", () => {
       });
 
       const sessionId = bridge.getSessionId(taskId, cwd);
-      expect(sessionId).toBeDefined();
+      expect(typeof sessionId).toBe("string");
       expect(registry.store.get(sessionId!)).toMatchObject({
         status: "active",
         metadata: {
