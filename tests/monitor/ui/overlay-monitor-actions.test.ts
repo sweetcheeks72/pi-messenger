@@ -81,7 +81,7 @@ describe("handleMonitorDetailKeyBinding", () => {
     const tui = makeTUI();
 
     const executeSpy = vi.spyOn(registry.commandHandler, "execute");
-    executeSpy.mockReturnValue({ success: true });
+    executeSpy.mockReturnValue({ success: true, executedAt: new Date().toISOString() });
 
     handleMonitorDetailKeyBinding("p", viewState, registry, tui);
 
@@ -100,7 +100,7 @@ describe("handleMonitorDetailKeyBinding", () => {
     const tui = makeTUI();
 
     const executeSpy = vi.spyOn(registry.commandHandler, "execute");
-    executeSpy.mockReturnValue({ success: true });
+    executeSpy.mockReturnValue({ success: true, executedAt: new Date().toISOString() });
 
     handleMonitorDetailKeyBinding("p", viewState, registry, tui);
 
@@ -161,7 +161,7 @@ describe("handleMonitorDetailKeyBinding", () => {
     const tui = makeTUI();
 
     const executeSpy = vi.spyOn(registry.commandHandler, "execute");
-    executeSpy.mockReturnValue({ success: true });
+    executeSpy.mockReturnValue({ success: true, executedAt: new Date().toISOString() });
 
     handleMonitorDetailKeyBinding("i", viewState, registry, tui);
 
@@ -192,7 +192,7 @@ describe("handleConfirmInput (end-session)", () => {
     const tui = makeTUI();
 
     const executeSpy = vi.spyOn(registry.commandHandler, "execute");
-    executeSpy.mockReturnValue({ success: true });
+    executeSpy.mockReturnValue({ success: true, executedAt: new Date().toISOString() });
 
     handleConfirmInput("y", viewState, "/tmp", "TestAgent", tui, registry);
 
