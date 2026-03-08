@@ -389,14 +389,14 @@ function taskList(cwd: string, namespace: string) {
 // task.start
 // =============================================================================
 
-function taskStart(cwd: string, params: CrewParams, state: MessengerState, _namespace: string) {
+function taskStart(cwd: string, params: CrewParams, state: MessengerState, namespace: string) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.start", { mode: "task.start", error: "missing_id" });
   }
 
   const agentName = state.agentName || "unknown";
-  const actionResult = executeTaskAction(cwd, "start", id, agentName);
+  const actionResult = executeTaskAction(cwd, "start", id, agentName, namespace);
   if (!actionResult.success || !actionResult.task) {
     return result(`Error: ${actionResult.message}`, {
       mode: "task.start",
@@ -541,7 +541,7 @@ function taskDone(cwd: string, params: CrewParams, state: MessengerState, namesp
 // task.block
 // =============================================================================
 
-function taskBlock(cwd: string, params: CrewParams, state: MessengerState, _namespace: string) {
+function taskBlock(cwd: string, params: CrewParams, state: MessengerState, namespace: string) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.block", { mode: "task.block", error: "missing_id" });
@@ -551,7 +551,7 @@ function taskBlock(cwd: string, params: CrewParams, state: MessengerState, _name
     return result("Error: reason required for task.block", { mode: "task.block", error: "missing_reason" });
   }
 
-  const actionResult = executeTaskAction(cwd, "block", id, state.agentName || "unknown", params.reason);
+  const actionResult = executeTaskAction(cwd, "block", id, state.agentName || "unknown", namespace, params.reason);
   if (!actionResult.success || !actionResult.task) {
     return result(`Error: ${actionResult.message}`, {
       mode: "task.block",
@@ -582,13 +582,13 @@ Unblock with: \`pi_messenger({ action: "task.unblock", id: "${id}" })\``;
 // task.unblock
 // =============================================================================
 
-function taskUnblock(cwd: string, params: CrewParams, state: MessengerState, _namespace: string) {
+function taskUnblock(cwd: string, params: CrewParams, state: MessengerState, namespace: string) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.unblock", { mode: "task.unblock", error: "missing_id" });
   }
 
-  const actionResult = executeTaskAction(cwd, "unblock", id, state.agentName || "unknown");
+  const actionResult = executeTaskAction(cwd, "unblock", id, state.agentName || "unknown", namespace);
   if (!actionResult.success || !actionResult.task) {
     return result(`Error: ${actionResult.message}`, {
       mode: "task.unblock",
@@ -671,7 +671,7 @@ function taskReady(cwd: string, namespace: string) {
 // task.reset
 // =============================================================================
 
-function taskReset(cwd: string, params: CrewParams, state: MessengerState, _namespace: string) {
+function taskReset(cwd: string, params: CrewParams, state: MessengerState, namespace: string) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.reset", { mode: "task.reset", error: "missing_id" });
@@ -679,7 +679,7 @@ function taskReset(cwd: string, params: CrewParams, state: MessengerState, _name
 
   const cascade = params.cascade ?? false;
   const action = cascade ? "cascade-reset" : "reset";
-  const actionResult = executeTaskAction(cwd, action, id, state.agentName || "unknown");
+  const actionResult = executeTaskAction(cwd, action, id, state.agentName || "unknown", namespace);
   if (!actionResult.success) {
     return result(`Error: ${actionResult.message}`, {
       mode: "task.reset",

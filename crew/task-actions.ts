@@ -24,10 +24,11 @@ export function executeTaskAction(
   action: TaskAction,
   taskId: string,
   agentName: string,
+  namespace: string,
   reason?: string,
   options?: TaskActionOptions,
 ): TaskActionResult {
-  const task = store.getTask(cwd, taskId);
+  const task = store.getTask(cwd, taskId, namespace);
   if (!task) return { success: false, error: "not_found", message: `Task ${taskId} not found` };
 
   switch (action) {
@@ -43,7 +44,7 @@ export function executeTaskAction(
       }
       const config = loadCrewConfig(store.getCrewDir(cwd));
       if (config.dependencies !== "advisory") {
-        const unmetDependencies = task.depends_on.filter(depId => store.getTask(cwd, depId)?.status !== "done");
+        const unmetDependencies = task.depends_on.filter(depId => store.getTask(cwd, depId, namespace)?.status !== "done");
         if (unmetDependencies.length > 0) {
           return {
             success: false,
