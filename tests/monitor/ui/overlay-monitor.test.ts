@@ -91,7 +91,7 @@ vi.mock("../../../crew/lobby.js", () => ({
 
 // ─── Actual test imports ──────────────────────────────────────────────────────
 
-import { renderMonitorView, renderMonitorDetailView } from "../../../overlay-render.js";
+import { renderAttentionQueue, renderMonitorView, renderMonitorDetailView } from "../../../overlay-render.js";
 import type { CrewViewState } from "../../../overlay-actions.js";
 import { MonitorRegistry } from "../../../src/monitor/registry.js";
 
@@ -178,6 +178,52 @@ describe("renderMonitorView", () => {
     renderMonitorView(registry, 80, 10, viewState);
     // Should be clamped to 0 (only 1 session)
     expect(viewState.monitorSelectedIndex).toBe(0);
+    registry.dispose();
+  });
+
+  it("renders attention queue with no attention items", () => {
+    const registry = makeRegistry();
+    const startedAt = new Date().toISOString();
+    registry.lifecycle.start({
+      id: "sess-attn-none",
+      name: "Healthy Session",
+      cwd: "/tmp",
+      model: "claude-3",
+      startedAt,
+      agent: "TestAgent",
+    });
+
+    const sessions = registry.store.list();
+    const healthMap = new Map<string, "healthy" | "degraded" | "critical">([
+      [sessions[0].metadata.id, "healthy"],
+    ]);
+    const lines = renderAttentionQueue(sessions, healthMap, new Map(), 80, 10);
+
+    expect(lines).toHaveLength(10);
+    expect(lines.join("\n")).toContain("No sessions require attention");
+    registry.dispose();
+  });
+
+  it("renders attention queue items from derived attention", () => {
+    const registry = makeRegistry();
+    const startedAt = new Date().toISOString();
+    registry.lifecycle.start({
+      id: "sess-attn-degraded",
+      name: "Degraded Session",
+      cwd: "/tmp",
+      model: "claude-3",
+      startedAt,
+      agent: "TestAgent",
+    });
+
+    const sessions = registry.store.list();
+    const healthMap = new Map<string, "healthy" | "degraded" | "critical">([
+      [sessions[0].metadata.id, "degraded"],
+    ]);
+    const lines = renderAttentionQueue(sessions, healthMap, new Map(), 80, 12, Date.parse(startedAt) + 35_000);
+
+    expect(lines.join("\n")).toContain("degraded");
+    expect(lines.join("\n")).toContain(sessions[0].metadata.id);
     registry.dispose();
   });
 

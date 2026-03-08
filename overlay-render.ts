@@ -44,6 +44,10 @@ import { listCheckpoints, getCheckpointDiff } from "./crew/utils/checkpoint.js";
 import { getLobbyWorkerCount } from "./crew/lobby.js";
 import type { CrewViewState } from "./overlay-actions.js";
 import type { MonitorRegistry } from "./src/monitor/registry.js";
+import { deriveAttentionItems } from "./src/monitor/attention/derivation.js";
+import type { AttentionItem } from "./src/monitor/types/attention.js";
+import type { HealthStatus } from "./src/monitor/health/types.js";
+import type { SessionState } from "./src/monitor/types/session.js";
 import { renderGroupedSessions } from "./src/monitor/ui/render.js";
 import { renderSessionDetailView } from "./src/monitor/ui/session-detail.js";
 
@@ -844,6 +848,55 @@ function renderTaskLine(theme: Theme, task: Task, isSelected: boolean, width: nu
 }
 
 
+function padLines(lines: string[], height: number): string[] {
+  const visible = lines.slice(0, height);
+  while (visible.length < height) visible.push("");
+  return visible;
+}
+
+function deriveAttentionRows(
+  sessions: SessionState[],
+  healthMap: Map<string, HealthStatus>,
+  metricsMap: Map<string, unknown>,
+  nowMs?: number,
+): AttentionItem[] {
+  return deriveAttentionItems(sessions, healthMap, metricsMap, nowMs);
+}
+
+function renderAttentionQueueLines(items: AttentionItem[], width: number): string[] {
+  if (items.length === 0) {
+    return [truncateToWidth("  No sessions require attention", width)];
+  }
+
+  const lines: string[] = [];
+  for (const item of items) {
+    lines.push(truncateToWidth(`  ${item.reason} ${item.sessionId}`, width));
+    lines.push(truncateToWidth(`    ${item.message}`, width));
+    lines.push(truncateToWidth(`    Next: ${item.recommendedAction}`, width));
+  }
+  return lines;
+}
+
+export function renderAttentionQueue(
+  sessions: SessionState[],
+  healthMap: Map<string, HealthStatus>,
+  metricsMap: Map<string, unknown>,
+  width: number,
+  height: number,
+  nowMs?: number,
+): string[] {
+  const items = deriveAttentionRows(sessions, healthMap, metricsMap, nowMs);
+  return padLines(renderAttentionQueueLines(items, width), height);
+}
+
+function renderMonitorSessionRows(
+  sessions: SessionState[],
+  selectedIndex: number,
+  width: number,
+): string[] {
+  return renderGroupedSessions(sessions, selectedIndex, width);
+}
+
 export function renderMonitorView(
   registry: MonitorRegistry | undefined,
   width: number,
@@ -852,25 +905,20 @@ export function renderMonitorView(
 ): string[] {
   if (!registry) {
     const lines: string[] = ["  No monitor registry available."];
-    while (lines.length < height) lines.push("");
-    return lines.slice(0, height);
+    return padLines(lines, height);
   }
 
   const sessions = registry.store.list();
   if (sessions.length === 0) {
     const lines: string[] = ["  No active sessions."];
-    while (lines.length < height) lines.push("");
-    return lines.slice(0, height);
+    return padLines(lines, height);
   }
 
   const clampedIndex = Math.max(0, Math.min(viewState.monitorSelectedIndex, sessions.length - 1));
   viewState.monitorSelectedIndex = clampedIndex;
 
-  const allLines = renderGroupedSessions(sessions, clampedIndex, width);
-
-  const visible = allLines.slice(0, height);
-  while (visible.length < height) visible.push("");
-  return visible;
+  const allLines = renderMonitorSessionRows(sessions, clampedIndex, width);
+  return padLines(allLines, height);
 }
 
 export function renderMonitorDetailView(
