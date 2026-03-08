@@ -23,6 +23,7 @@ import { clearHeartbeat } from "../heartbeat.js";
 import { checkStaleHeartbeats } from "../lobby.js";
 import { recordReviewOutcome, getReviewIntensity } from "../credibility.js";
 import { classifyTask, recordTaskOutcome } from "../specialization.js";
+import { checkWaveConflicts } from "../conflict-detector.js";
 
 type NamespaceParams = CrewParams & {
   crew?: string;
@@ -914,6 +915,35 @@ export async function execute(
     }
   }
 
+  // Check for conflicts among succeeded tasks in this wave
+  let conflictText = "";
+  if (succeeded.length >= 2) {
+    try {
+      const conflicts = checkWaveConflicts(cwd, succeeded);
+      const detected = conflicts.filter(c => c.hasConflict);
+      if (detected.length > 0) {
+        const conflictSummaries = detected.map(c =>
+          `⚠️ Conflict: ${c.taskA} ↔ ${c.taskB} on ${c.conflictingFiles.join(", ")} (${c.overlappingHunks.length} overlapping hunk(s))`
+        );
+        conflictText = "\n" + conflictSummaries.join("\n");
+
+        // Log conflict events to feed
+        for (const c of detected) {
+          logFeedEvent(cwd, "conflict-detector", "message", c.taskA,
+            `⚠️ Conflict with ${c.taskB} on ${c.conflictingFiles.join(", ")}`);
+          appendEntry("crew_conflict_detected", {
+            taskA: c.taskA,
+            taskB: c.taskB,
+            files: c.conflictingFiles,
+            hunks: c.overlappingHunks.length,
+          });
+        }
+      }
+    } catch {
+      // Conflict detection is best-effort — don't block the wave
+    }
+  }
+
   // Build result
   const updatedPlan = store.getPlan(cwd);
   const progress = updatedPlan 
@@ -944,7 +974,7 @@ export async function execute(
 **PRD:** ${store.getPlanLabel(plan)}
 **Tasks attempted:** ${attemptedTaskIds.length}${lobbyAssigned.size > 0 ? ` (+${lobbyAssigned.size} lobby)` : ""}
 **Progress:** ${progress}
-${statusText}${lobbyText}${nextText}
+${statusText}${conflictText}${lobbyText}${nextText}
 
 ${continueText}`;
 

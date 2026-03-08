@@ -45,6 +45,7 @@ function setupCrewTaskMetadata(dir: string, taskId: string, baseCommit: string, 
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       base_commit: baseCommit,
+      head_commit: headCommit,
       attempt_count: 1,
     })
   );
@@ -104,21 +105,24 @@ index abc..def 100644
     it("returns no conflict when tasks touch different files", () => {
       const baseCommit = git("rev-parse HEAD", testDir);
 
-      // Simulate task-1 changing fileA
+      // Simulate task-1 on its own branch changing fileA
+      git("checkout -b task-1-branch", testDir);
       fs.writeFileSync(path.join(testDir, "fileA.ts"), "CHANGED\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n");
       git("add -A", testDir);
       git("commit -m 'task-1 changes fileA'", testDir);
-      const commitA = git("rev-parse HEAD", testDir);
+      const headA = git("rev-parse HEAD", testDir);
 
-      // Simulate task-2 changing fileB
+      // Simulate task-2 on its own branch changing fileB
+      git("checkout " + baseCommit, testDir);
+      git("checkout -b task-2-branch", testDir);
       fs.writeFileSync(path.join(testDir, "fileB.ts"), "ALPHA\nbeta\ngamma\ndelta\nepsilon\n");
       git("add -A", testDir);
       git("commit -m 'task-2 changes fileB'", testDir);
-      const commitB = git("rev-parse HEAD", testDir);
+      const headB = git("rev-parse HEAD", testDir);
 
-      // Set up task metadata
-      setupCrewTaskMetadata(testDir, "task-1", baseCommit);
-      setupCrewTaskMetadata(testDir, "task-2", baseCommit);
+      // Set up task metadata with head_commit tracking
+      setupCrewTaskMetadata(testDir, "task-1", baseCommit, headA);
+      setupCrewTaskMetadata(testDir, "task-2", baseCommit, headB);
 
       const result = detectConflicts(testDir, "task-1", "task-2");
       expect(result.hasConflict).toBe(false);
@@ -129,20 +133,23 @@ index abc..def 100644
     it("detects conflict when tasks touch same file with overlapping hunks", () => {
       const baseCommit = git("rev-parse HEAD", testDir);
 
-      // Both tasks modify the same lines in fileA
-      // We simulate this by having both base_commits point to the initial commit
-      // and then making both changes in sequence
+      // task-1 modifies fileA line 1 on its own branch
+      git("checkout -b task-1-branch", testDir);
       fs.writeFileSync(path.join(testDir, "fileA.ts"), "CHANGED_BY_A\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n");
       git("add -A", testDir);
       git("commit -m 'task-1 changes fileA line 1'", testDir);
+      const headA = git("rev-parse HEAD", testDir);
 
-      fs.writeFileSync(path.join(testDir, "fileA.ts"), "CHANGED_BY_A\nCHANGED_BY_B\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n");
+      // task-2 modifies fileA lines 1-2 on its own branch (overlapping)
+      git("checkout " + baseCommit, testDir);
+      git("checkout -b task-2-branch", testDir);
+      fs.writeFileSync(path.join(testDir, "fileA.ts"), "CHANGED_BY_B\nCHANGED_BY_B\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n");
       git("add -A", testDir);
-      git("commit -m 'task-2 changes fileA line 2'", testDir);
+      git("commit -m 'task-2 changes fileA lines 1-2'", testDir);
+      const headB = git("rev-parse HEAD", testDir);
 
-      // Both tasks have the same base commit (the initial one)
-      setupCrewTaskMetadata(testDir, "task-1", baseCommit);
-      setupCrewTaskMetadata(testDir, "task-2", baseCommit);
+      setupCrewTaskMetadata(testDir, "task-1", baseCommit, headA);
+      setupCrewTaskMetadata(testDir, "task-2", baseCommit, headB);
 
       const result = detectConflicts(testDir, "task-1", "task-2");
       expect(result.hasConflict).toBe(true);
@@ -155,24 +162,32 @@ index abc..def 100644
     it("checks all pairs of completed tasks for conflicts", () => {
       const baseCommit = git("rev-parse HEAD", testDir);
 
-      // task-1 changes fileA
+      // task-1 changes fileA on its branch
+      git("checkout -b task-1-branch", testDir);
       fs.writeFileSync(path.join(testDir, "fileA.ts"), "CHANGED_BY_1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n");
       git("add -A", testDir);
       git("commit -m 'task-1'", testDir);
+      const head1 = git("rev-parse HEAD", testDir);
 
-      // task-2 changes fileB (no conflict with task-1)
+      // task-2 changes fileB on its branch (no conflict with task-1)
+      git("checkout " + baseCommit, testDir);
+      git("checkout -b task-2-branch", testDir);
       fs.writeFileSync(path.join(testDir, "fileB.ts"), "CHANGED_BY_2\nbeta\ngamma\ndelta\nepsilon\n");
       git("add -A", testDir);
       git("commit -m 'task-2'", testDir);
+      const head2 = git("rev-parse HEAD", testDir);
 
-      // task-3 changes fileA (conflict with task-1)
-      fs.writeFileSync(path.join(testDir, "fileA.ts"), "CHANGED_BY_1\nCHANGED_BY_3\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n");
+      // task-3 changes fileA on its branch (conflict with task-1)
+      git("checkout " + baseCommit, testDir);
+      git("checkout -b task-3-branch", testDir);
+      fs.writeFileSync(path.join(testDir, "fileA.ts"), "CHANGED_BY_3\nCHANGED_BY_3\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n");
       git("add -A", testDir);
       git("commit -m 'task-3'", testDir);
+      const head3 = git("rev-parse HEAD", testDir);
 
-      setupCrewTaskMetadata(testDir, "task-1", baseCommit);
-      setupCrewTaskMetadata(testDir, "task-2", baseCommit);
-      setupCrewTaskMetadata(testDir, "task-3", baseCommit);
+      setupCrewTaskMetadata(testDir, "task-1", baseCommit, head1);
+      setupCrewTaskMetadata(testDir, "task-2", baseCommit, head2);
+      setupCrewTaskMetadata(testDir, "task-3", baseCommit, head3);
 
       const results = checkWaveConflicts(testDir, ["task-1", "task-2", "task-3"]);
       // Should find conflict between task-1 and task-3
