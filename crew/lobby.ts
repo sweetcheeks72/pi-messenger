@@ -548,3 +548,136 @@ export function checkStaleHeartbeats(cwd: string): void {
     );
   }
 }
+
+// =============================================================================
+// Smoke Test — Background Repo Health Checks
+// =============================================================================
+
+import type { ChildProcess } from "node:child_process";
+
+let smokeTestProc: ChildProcess | null = null;
+let smokeTestTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Determine whether a background smoke test should run.
+ * Returns true when 3+ tasks (configurable via minActiveTasks) are currently in_progress.
+ */
+export function shouldRunSmokeTest(cwd: string): boolean {
+  const crewDir = store.getCrewDir(cwd);
+  const config = loadCrewConfig(crewDir);
+  if (!config.smokeTest.enabled) return false;
+
+  const tasks = store.getTasks(cwd);
+  const activeCount = tasks.filter(
+    (t) => t.status === "in_progress" || t.status === "starting",
+  ).length;
+  return activeCount >= config.smokeTest.minActiveTasks;
+}
+
+/**
+ * Spawn the smoke-tester agent as a background process.
+ * Only one smoke test runs at a time — subsequent calls are no-ops if one is already running.
+ */
+export function startSmokeTest(cwd: string): void {
+  if (smokeTestProc && smokeTestProc.exitCode === null) return;
+
+  const crewDir = store.getCrewDir(cwd);
+  const config = loadCrewConfig(crewDir);
+  const executable = resolveExecutable(config);
+
+  const agentPath = path.join(
+    os.homedir(),
+    ".pi",
+    "agent",
+    "agents",
+    "smoke-tester.md",
+  );
+
+  // Only spawn if the agent definition exists
+  if (!fs.existsSync(agentPath)) {
+    logFeedEvent(cwd, "smoke-tester", "smoke.skip", undefined, "smoke-tester.md agent not found");
+    return;
+  }
+
+  const prompt = `Run a smoke test on the repository at ${cwd}. Check compilation and tests. Report results.`;
+  const args = [
+    "--mode", "json",
+    "--no-session",
+    "--tools", "read,bash,grep,find",
+    "--append-system-prompt", agentPath,
+    "-p", prompt,
+  ];
+
+  const model = config.models?.worker;
+  if (model) pushModelArgs(args, model);
+
+  smokeTestProc = spawn(executable, args, {
+    cwd,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, PI_AGENT_NAME: "smoke-tester", PI_CREW_WORKER: "1" },
+  });
+
+  logFeedEvent(cwd, "smoke-tester", "smoke.start", undefined, "Background smoke test started");
+
+  smokeTestProc.on("close", (exitCode) => {
+    logFeedEvent(
+      cwd,
+      "smoke-tester",
+      exitCode === 0 ? "smoke.pass" : "smoke.fail",
+      undefined,
+      `Smoke test exited (code ${exitCode ?? "unknown"})`,
+    );
+    smokeTestProc = null;
+  });
+
+  smokeTestProc.on("error", (err) => {
+    logFeedEvent(cwd, "smoke-tester", "smoke.error", undefined, `Smoke test spawn error: ${err.message}`);
+    smokeTestProc = null;
+  });
+}
+
+/**
+ * Kill the running smoke test process, if any.
+ */
+export function stopSmokeTest(): void {
+  if (smokeTestProc && smokeTestProc.exitCode === null) {
+    smokeTestProc.kill("SIGTERM");
+    smokeTestProc = null;
+  }
+  if (smokeTestTimer) {
+    clearInterval(smokeTestTimer);
+    smokeTestTimer = null;
+  }
+}
+
+/**
+ * Start or stop the periodic smoke test check based on current task activity.
+ * Call this from any monitoring/polling cycle (e.g. work waves, autonomous loop).
+ */
+export function manageSmokeTestCycle(cwd: string): void {
+  const crewDir = store.getCrewDir(cwd);
+  const config = loadCrewConfig(crewDir);
+
+  if (!config.smokeTest.enabled) {
+    stopSmokeTest();
+    return;
+  }
+
+  if (shouldRunSmokeTest(cwd)) {
+    // Start periodic checks if not already running
+    if (!smokeTestTimer) {
+      // Run one immediately
+      startSmokeTest(cwd);
+      // Schedule periodic runs
+      smokeTestTimer = setInterval(() => {
+        if (shouldRunSmokeTest(cwd)) {
+          startSmokeTest(cwd);
+        } else {
+          stopSmokeTest();
+        }
+      }, config.smokeTest.intervalMs);
+    }
+  } else {
+    stopSmokeTest();
+  }
+}

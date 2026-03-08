@@ -37,7 +37,12 @@ export type FeedEventType =
   | "health"
   | "heartbeat.stale"
   | "question.ask"
-  | "question.answer";
+  | "question.answer"
+  | "smoke.start"
+  | "smoke.pass"
+  | "smoke.fail"
+  | "smoke.error"
+  | "smoke.skip";
 
 export interface FeedEvent {
   ts: string;
@@ -121,6 +126,11 @@ const CREW_EVENT_TYPES = new Set<FeedEventType>([
   "plan.cancel",
   "plan.failed",
   "health",
+  "smoke.start",
+  "smoke.pass",
+  "smoke.fail",
+  "smoke.error",
+  "smoke.skip",
 ]);
 
 export function formatFeedLine(event: FeedEvent): string {

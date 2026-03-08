@@ -74,6 +74,12 @@ export interface CrewConfig {
   dependencies: "advisory" | "strict";
   coordination: CoordinationLevel;
   messageBudgets: Record<CoordinationLevel, number>;
+  smokeTest: {
+    enabled: boolean;
+    intervalMs: number;
+    /** Minimum number of in_progress tasks before smoke tests trigger */
+    minActiveTasks: number;
+  };
 }
 
 const DEFAULT_CONFIG: CrewConfig = {
@@ -96,6 +102,7 @@ const DEFAULT_CONFIG: CrewConfig = {
   dependencies: "advisory",
   coordination: "chatty",
   messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: 10 },
+  smokeTest: { enabled: true, intervalMs: 120_000, minActiveTasks: 3 },
 };
 
 function loadJson(filePath: string): Record<string, unknown> {
