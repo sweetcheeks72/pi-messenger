@@ -10,3 +10,4 @@ export {
   ANSI,
   type HealthStatus,
 } from "./render.js";
+export * from "./inspector.js";
