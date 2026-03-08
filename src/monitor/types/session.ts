@@ -1,5 +1,16 @@
 import { z } from "zod";
 
+interface WorkerLike {
+  cwd: string;
+  taskId: string;
+  agent: string;
+  name: string;
+  startedAt: number;
+  progress: {
+    model?: string;
+  };
+}
+
 export const SessionStatusSchema = z.enum(["idle", "active", "paused", "ended", "error"]);
 export type SessionStatus = z.infer<typeof SessionStatusSchema>;
 
@@ -10,6 +21,9 @@ export const SessionMetadataSchema = z.object({
   model: z.string(),
   startedAt: z.string().datetime(),
   agent: z.string(),
+  taskId: z.string().optional(),
+  workerPid: z.number().int().optional(),
+  agentRole: z.string().optional(),
 });
 export type SessionMetadata = z.infer<typeof SessionMetadataSchema>;
 
@@ -36,3 +50,16 @@ export const SessionStateSchema = z.object({
   events: z.array(SessionEventSchema),
 });
 export type SessionState = z.infer<typeof SessionStateSchema>;
+
+export function buildWorkerSessionMetadata(worker: WorkerLike): SessionMetadata {
+  return SessionMetadataSchema.parse({
+    id: worker.taskId,
+    name: worker.name,
+    cwd: worker.cwd,
+    model: worker.progress.model ?? "unknown",
+    startedAt: new Date(worker.startedAt).toISOString(),
+    agent: worker.agent,
+    taskId: worker.taskId,
+    agentRole: worker.agent,
+  });
+}
