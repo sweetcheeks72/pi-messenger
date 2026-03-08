@@ -33,7 +33,8 @@ export type FeedEventType =
   | "plan.done"
   | "plan.cancel"
   | "plan.failed"
-  | "stuck";
+  | "stuck"
+  | "health";
 
 export interface FeedEvent {
   ts: string;
@@ -116,6 +117,7 @@ const CREW_EVENT_TYPES = new Set<FeedEventType>([
   "plan.done",
   "plan.cancel",
   "plan.failed",
+  "health",
 ]);
 
 export function formatFeedLine(event: FeedEvent): string {
@@ -169,6 +171,7 @@ export function formatFeedLine(event: FeedEvent): string {
     case "plan.cancel": line += " planning cancelled"; break;
     case "plan.failed": line += withPreview(" planning failed"); break;
     case "stuck": line += " appears stuck"; break;
+    case "health": line += withPreview(` health alert: ${event.target ?? ""}`); break;
     default: line += ` ${event.type}`; break;
   }
   return line;

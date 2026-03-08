@@ -70,6 +70,7 @@ export class MessengerOverlay implements Component, Focusable {
   private prevInProgressCount = 0;
   private registry: MonitorRegistry | undefined;
   private bridge: CrewMonitorBridge | undefined;
+  private healthAlertUnsubscribe: (() => void) | null = null;
 
   constructor(
     private tui: TUI,
@@ -84,6 +85,13 @@ export class MessengerOverlay implements Component, Focusable {
     this.registry = registry;
     if (registry) {
       this.bridge = createCrewMonitorBridge(registry, { cwd: this.cwd });
+      this.healthAlertUnsubscribe = registry.healthMonitor.onAlert((alert) => {
+        const statusLabel = alert.status === "critical" ? "🔴" : "🟡";
+        const message = `${statusLabel} Session ${alert.sessionId.slice(0, 8)} ${alert.status}: ${alert.reason}`;
+        logFeedEvent(this.cwd, "monitor", "health", alert.sessionId, alert.reason);
+        setNotification(this.crewViewState, this.tui, alert.status === "critical", message);
+        this.tui.requestRender();
+      });
     }
     const cfg = loadConfig(this.cwd);
     this.stuckThresholdMs = cfg.stuckThreshold * 1000;
@@ -799,6 +807,8 @@ export class MessengerOverlay implements Component, Focusable {
     }
     this.bridge?.dispose();
     this.bridge = undefined;
+    this.healthAlertUnsubscribe?.();
+    this.healthAlertUnsubscribe = null;
     this.progressUnsubscribe?.();
     this.progressUnsubscribe = null;
   }
