@@ -181,49 +181,58 @@ describe("renderMonitorView", () => {
     registry.dispose();
   });
 
-  it("renders attention queue with no attention items", () => {
+  it("paused session contains Attention", () => {
     const registry = makeRegistry();
     const startedAt = new Date().toISOString();
-    registry.lifecycle.start({
-      id: "sess-attn-none",
-      name: "Healthy Session",
+    const id = registry.lifecycle.start({
+      id: "sess-paused",
+      name: "Paused Session",
       cwd: "/tmp",
       model: "claude-3",
       startedAt,
       agent: "TestAgent",
     });
+    registry.lifecycle.pause(id, "waiting for input");
 
-    const sessions = registry.store.list();
-    const healthMap = new Map<string, "healthy" | "degraded" | "critical">([
-      [sessions[0].metadata.id, "healthy"],
-    ]);
-    const lines = renderAttentionQueue(sessions, healthMap, new Map(), 80, 10);
-
-    expect(lines).toHaveLength(10);
-    expect(lines.join("\n")).toContain("No sessions require attention");
+    const viewState = makeViewState();
+    const lines = renderMonitorView(registry, 80, 20, viewState);
+    expect(lines.join("\n")).toContain("⚠ Attention");
     registry.dispose();
   });
 
-  it("renders attention queue items from derived attention", () => {
+  it("error session contains Attention", () => {
     const registry = makeRegistry();
     const startedAt = new Date().toISOString();
-    registry.lifecycle.start({
-      id: "sess-attn-degraded",
-      name: "Degraded Session",
+    const id = registry.lifecycle.start({
+      id: "sess-error",
+      name: "Error Session",
       cwd: "/tmp",
       model: "claude-3",
       startedAt,
       agent: "TestAgent",
     });
+    registry.lifecycle.escalate(id, "tool failure");
 
-    const sessions = registry.store.list();
-    const healthMap = new Map<string, "healthy" | "degraded" | "critical">([
-      [sessions[0].metadata.id, "degraded"],
-    ]);
-    const lines = renderAttentionQueue(sessions, healthMap, new Map(), 80, 12, Date.parse(startedAt) + 35_000);
+    const viewState = makeViewState();
+    const lines = renderMonitorView(registry, 80, 20, viewState);
+    expect(lines.join("\n")).toContain("⚠ Attention");
+    registry.dispose();
+  });
 
-    expect(lines.join("\n")).toContain("degraded");
-    expect(lines.join("\n")).toContain(sessions[0].metadata.id);
+  it("healthy session does not contain ⚠ Attention", () => {
+    const registry = makeRegistry();
+    registry.lifecycle.start({
+      id: "sess-healthy",
+      name: "Healthy Session",
+      cwd: "/tmp",
+      model: "claude-3",
+      startedAt: new Date().toISOString(),
+      agent: "TestAgent",
+    });
+
+    const viewState = makeViewState();
+    const lines = renderMonitorView(registry, 80, 20, viewState);
+    expect(lines.join("\n")).not.toContain("⚠ Attention");
     registry.dispose();
   });
 
@@ -232,6 +241,43 @@ describe("renderMonitorView", () => {
     const viewState = makeViewState();
     const lines = renderMonitorView(registry, 80, 15, viewState);
     expect(lines).toHaveLength(15);
+    registry.dispose();
+  });
+});
+
+describe("renderAttentionQueue", () => {
+  it("returns empty queue state when no items are found", () => {
+    const lines = renderAttentionQueue([], new Map(), new Map(), 80, 10);
+
+    expect(lines.join("\n")).toContain("No sessions require attention");
+  });
+
+  it("renders a sample attention item", () => {
+    const registry = makeRegistry();
+    const startedAt = new Date().toISOString();
+    const id = registry.lifecycle.start({
+      id: "sess-attn-sample",
+      name: "Sample Session",
+      cwd: "/tmp",
+      model: "claude-3",
+      startedAt,
+      agent: "TestAgent",
+    });
+    const session = registry.store.get(id);
+    if (!session) {
+      throw new Error("Session missing");
+    }
+
+    const sessions = [session];
+    const healthMap = new Map<string, "healthy" | "degraded" | "critical">([
+      [sessions[0].metadata.id, "degraded"],
+    ]);
+
+    const lines = renderAttentionQueue(sessions, healthMap, new Map(), 100, 12, Date.parse(startedAt) + 35_000);
+    const text = lines.join("\n");
+
+    expect(text).toContain("⚠ Attention");
+    expect(text).toContain(sessions[0].metadata.id);
     registry.dispose();
   });
 });

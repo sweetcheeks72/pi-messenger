@@ -83,7 +83,7 @@ export class MessengerOverlay implements Component, Focusable {
   private replayMode = false;
   /** Scroll offset for the replay timeline view */
   private replayScroll = 0;
-  private attentionPanel: AttentionQueuePanel;
+  private attentionPanel: AttentionQueuePanel | undefined;
 
   constructor(
     private tui: TUI,
@@ -105,20 +105,19 @@ export class MessengerOverlay implements Component, Focusable {
         setNotification(this.crewViewState, this.tui, alert.status === "critical", message);
         this.tui.requestRender();
       });
-    }
 
-    this.attentionPanel = new AttentionQueuePanel();
-    this.attentionPanel.onSelect((item) => {
-      if (!this.registry) return;
-      const sessions = this.registry.store.list();
-      const index = sessions.findIndex((session) => session.metadata.id === item.sessionId);
-      if (index >= 0) {
-        this.crewViewState.monitorSelectedIndex = index;
-        this.crewViewState.mode = "monitor-detail";
-        this.crewViewState.monitorDetailScroll = 0;
-        this.tui.requestRender();
-      }
-    });
+      this.attentionPanel = new AttentionQueuePanel();
+      this.attentionPanel.onSelect((item) => {
+        const sessions = registry.store.list();
+        const index = sessions.findIndex((session) => session.metadata.id === item.sessionId);
+        if (index >= 0) {
+          this.crewViewState.monitorSelectedIndex = index;
+          this.crewViewState.mode = "monitor-detail";
+          this.crewViewState.monitorDetailScroll = 0;
+          this.tui.requestRender();
+        }
+      });
+    }
 
     const cfg = loadConfig(this.cwd);
     this.stuckThresholdMs = cfg.stuckThreshold * 1000;
@@ -479,8 +478,9 @@ export class MessengerOverlay implements Component, Focusable {
 
     if (matchesKey(data, "enter")) {
       if (this.crewViewState.mode === "monitor") {
-        if (this.attentionPanel.getSelectedItem()) {
-          this.attentionPanel.handleInput(data);
+        const selected = this.attentionPanel?.getSelectedItem();
+        if (selected) {
+          this.attentionPanel?.handleInput("\r");
         } else {
           this.crewViewState.mode = "monitor-detail";
           this.crewViewState.monitorDetailScroll = 0;
@@ -706,7 +706,10 @@ export class MessengerOverlay implements Component, Focusable {
     } else if (this.crewViewState.mode === "monitor-detail") {
       contentLines = renderMonitorDetailView(this.registry, sectionW, contentHeight, this.crewViewState);
     } else if (this.crewViewState.mode === "monitor") {
-      this.refreshAttentionPanelItems();
+      if (this.attentionPanel && this.registry) {
+        const sessions = this.registry.store.list();
+        this.attentionPanel.setItems(deriveAttentionItems(sessions, new Map(), new Map()));
+      }
       contentLines = renderMonitorView(this.registry, sectionW, contentHeight, this.crewViewState);
     } else if (this.crewViewState.mode === "detail" && selectedTask) {
       contentLines = renderDetailView(this.cwd, selectedTask, sectionW, contentHeight, this.crewViewState);
@@ -881,25 +884,6 @@ export class MessengerOverlay implements Component, Focusable {
     }
   }
 
-  private refreshAttentionPanelItems(): void {
-    if (!this.registry) {
-      this.attentionPanel.setItems([]);
-      return;
-    }
-
-    const sessions = this.registry.store.list();
-    const healthMap = new Map<string, ReturnType<typeof this.registry.healthMonitor.checkHealth>>();
-    const metricsMap = new Map<string, ReturnType<typeof this.registry.aggregator.computeMetrics>>();
-
-    for (const session of sessions) {
-      healthMap.set(session.metadata.id, this.registry.healthMonitor.checkHealth(session.metadata.id));
-      metricsMap.set(session.metadata.id, this.registry.aggregator.computeMetrics(session.metadata.id));
-    }
-
-    const items = deriveAttentionItems(sessions, healthMap, metricsMap);
-    this.attentionPanel.setItems(items);
-  }
-
   private renderTitleContent(): string {
     const label = this.theme.fg("accent", "Messenger");
     const folder = this.theme.fg("dim", extractFolder(this.cwd));
@@ -922,7 +906,8 @@ export class MessengerOverlay implements Component, Focusable {
     this.bridge = undefined;
     this.healthAlertUnsubscribe?.();
     this.healthAlertUnsubscribe = null;
-    this.attentionPanel.dispose();
+    this.attentionPanel?.dispose();
+    this.attentionPanel = undefined;
     this.progressUnsubscribe?.();
     this.progressUnsubscribe = null;
   }

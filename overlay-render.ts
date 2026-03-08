@@ -848,33 +848,43 @@ function renderTaskLine(theme: Theme, task: Task, isSelected: boolean, width: nu
 }
 
 
-function padLines(lines: string[], height: number): string[] {
-  const visible = lines.slice(0, height);
-  while (visible.length < height) visible.push("");
-  return visible;
-}
+function buildHealthMapFromSessions(sessions: SessionState[]): Map<string, HealthStatus> {
+  const now = Date.now();
+  const map = new Map<string, HealthStatus>();
 
-function deriveAttentionRows(
-  sessions: SessionState[],
-  healthMap: Map<string, HealthStatus>,
-  metricsMap: Map<string, unknown>,
-  nowMs?: number,
-): AttentionItem[] {
-  return deriveAttentionItems(sessions, healthMap, metricsMap, nowMs);
-}
+  for (const session of sessions) {
+    if (session.status !== "active") {
+      map.set(session.metadata.id, "healthy");
+      continue;
+    }
 
-function renderAttentionQueueLines(items: AttentionItem[], width: number): string[] {
-  if (items.length === 0) {
-    return [truncateToWidth("  No sessions require attention", width)];
+    const timestamps = session.events
+      .map((event) => Date.parse(event.timestamp))
+      .filter((timestamp) => Number.isFinite(timestamp));
+    const latest = timestamps.length > 0
+      ? Math.max(Date.parse(session.metadata.startedAt), ...timestamps)
+      : Date.parse(session.metadata.startedAt);
+
+    const ageMs = Math.max(0, now - latest);
+    const errorRate = session.metrics.eventCount > 0
+      ? session.metrics.errorCount / session.metrics.eventCount
+      : 0;
+
+    let health: HealthStatus = "healthy";
+    if (ageMs >= 120_000) {
+      health = "critical";
+    } else if (ageMs >= 30_000 || errorRate >= 0.5) {
+      health = "degraded";
+    }
+
+    map.set(session.metadata.id, health);
   }
 
-  const lines: string[] = [];
-  for (const item of items) {
-    lines.push(truncateToWidth(`  ${item.reason} ${item.sessionId}`, width));
-    lines.push(truncateToWidth(`    ${item.message}`, width));
-    lines.push(truncateToWidth(`    Next: ${item.recommendedAction}`, width));
-  }
-  return lines;
+  return map;
+}
+
+function attentionReasonLabel(_reason: AttentionItem["reason"]): string {
+  return "⚠ Attention";
 }
 
 export function renderAttentionQueue(
@@ -885,8 +895,24 @@ export function renderAttentionQueue(
   height: number,
   nowMs?: number,
 ): string[] {
-  const items = deriveAttentionRows(sessions, healthMap, metricsMap, nowMs);
-  return padLines(renderAttentionQueueLines(items, width), height);
+  const items = deriveAttentionItems(sessions, healthMap, metricsMap, nowMs);
+  if (items.length === 0) {
+    const lines: string[] = [truncateToWidth("  No sessions require attention", width)];
+    const visible = lines.slice(0, height);
+    while (visible.length < height) visible.push("");
+    return visible;
+  }
+
+  const lines: string[] = [];
+  for (const item of items) {
+    lines.push(truncateToWidth(`  ${attentionReasonLabel(item.reason)} ${item.sessionId}`, width));
+    lines.push(truncateToWidth(`    ${item.message}`, width));
+    lines.push(truncateToWidth(`    Next: ${item.recommendedAction}`, width));
+  }
+
+  const visible = lines.slice(0, height);
+  while (visible.length < height) visible.push("");
+  return visible;
 }
 
 function renderMonitorSessionRows(
@@ -905,20 +931,29 @@ export function renderMonitorView(
 ): string[] {
   if (!registry) {
     const lines: string[] = ["  No monitor registry available."];
-    return padLines(lines, height);
+    const visible = lines.slice(0, height);
+    while (visible.length < height) visible.push("");
+    return visible;
   }
 
   const sessions = registry.store.list();
   if (sessions.length === 0) {
     const lines: string[] = ["  No active sessions."];
-    return padLines(lines, height);
+    const visible = lines.slice(0, height);
+    while (visible.length < height) visible.push("");
+    return visible;
   }
 
   const clampedIndex = Math.max(0, Math.min(viewState.monitorSelectedIndex, sessions.length - 1));
   viewState.monitorSelectedIndex = clampedIndex;
 
-  const allLines = renderMonitorSessionRows(sessions, clampedIndex, width);
-  return padLines(allLines, height);
+  const healthMap = buildHealthMapFromSessions(sessions);
+  const attentionLines = renderAttentionQueue(sessions, healthMap, new Map(), width, Math.min(height, 12));
+  const allLines = [...attentionLines, ...renderMonitorSessionRows(sessions, clampedIndex, width)];
+
+  const visible = allLines.slice(0, height);
+  while (visible.length < height) visible.push("");
+  return visible;
 }
 
 export function renderMonitorDetailView(
