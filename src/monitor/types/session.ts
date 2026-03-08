@@ -75,3 +75,70 @@ export function buildWorkerSessionMetadata(worker: WorkerLike): SessionMetadata 
     agentRole: worker.agent,
   });
 }
+
+import type { LiveWorkerInfo, WorkerRuntimeSession } from "../../../crew/live-progress.js";
+
+export function buildWorkerSessionState(
+  worker: LiveWorkerInfo,
+  runtime?: WorkerRuntimeSession,
+): SessionState {
+  const metadata = buildWorkerSessionMetadata(worker);
+
+  const statusMap: Record<string, SessionStatus> = {
+    running: "active",
+    completed: "ended",
+    failed: "error",
+    pending: "idle",
+  };
+  const status: SessionStatus = statusMap[worker.progress.status] ?? "idle";
+
+  const metrics: SessionMetrics = {
+    duration: worker.progress.durationMs,
+    eventCount: runtime?.events.length ?? 0,
+    errorCount: 0,
+    toolCalls: worker.progress.toolCallCount,
+    tokensUsed: worker.progress.tokens,
+  };
+
+  const events: SessionHistoryEntry[] = [];
+
+  // session.start
+  events.push({ type: "session.start", timestamp: new Date(worker.startedAt).toISOString() });
+
+  // runtime events
+  if (runtime) {
+    for (const { event, timestamp } of runtime.events) {
+      const ts = new Date(timestamp).toISOString();
+      if (event.type === "tool_execution_start") {
+        events.push({ type: "tool.call", timestamp: ts, data: { toolName: event.toolName, args: event.args } });
+      } else if (event.type === "tool_execution_end") {
+        const textItem = event.result?.content?.find((c) => c.type === "text");
+        if (textItem?.text != null) {
+          events.push({ type: "execution.output", timestamp: ts, data: { text: textItem.text, stream: "stdout" } });
+        }
+      } else if (event.type === "message_end") {
+        const textItem = event.message?.content?.find((c) => c.type === "text");
+        if (event.message?.role === "assistant" && textItem?.text != null) {
+          events.push({ type: "agent.progress", timestamp: ts, data: { message: textItem.text, step: "assistant-response" } });
+        }
+      }
+    }
+
+    // terminal event
+    if (status === "ended") {
+      events.push({
+        type: "session.end",
+        timestamp: new Date(runtime.endedAt ?? worker.startedAt).toISOString(),
+        data: { summary: runtime.finalOutput, exitCode: runtime.exitCode },
+      });
+    } else if (status === "error") {
+      events.push({
+        type: "session.error",
+        timestamp: new Date(runtime.endedAt ?? worker.startedAt).toISOString(),
+        data: { error: runtime.finalError },
+      });
+    }
+  }
+
+  return { status, metadata, metrics, events };
+}
