@@ -1,7 +1,54 @@
-import type { Component, Focusable } from "@mariozechner/pi-tui";
-import { matchesKey, visibleWidth } from "@mariozechner/pi-tui";
 import type { AttentionItem } from "../types/attention.js";
 import { ANSI } from "./render.js";
+
+/** Minimal Component interface for TUI panels. */
+export interface Component {
+  render(width: number): string[];
+}
+
+/** Minimal Focusable interface for TUI panels. */
+export interface Focusable {
+  focused: boolean;
+  handleInput(data: string): void;
+  invalidate(): void;
+}
+
+// ─── Inline key-matching helpers ─────────────────────────────────────────────
+
+/** Returns the visible character count of a string (strips ANSI codes). */
+function visibleWidth(s: string): number {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
+}
+
+/**
+ * Returns true when raw terminal input `data` matches the named key.
+ * Accepts both ANSI escape sequences AND literal key name strings (e.g. "down")
+ * for testability.
+ */
+function matchesKey(
+  data: string,
+  key: "up" | "down" | "left" | "right" | "home" | "end" | "enter",
+): boolean {
+  switch (key) {
+    case "up":
+      return data === "\x1b[A" || data === "\x1bOA" || data === "up";
+    case "down":
+      return data === "\x1b[B" || data === "\x1bOB" || data === "down";
+    case "left":
+      return data === "\x1b[D" || data === "\x1bOD" || data === "left";
+    case "right":
+      return data === "\x1b[C" || data === "\x1bOC" || data === "right";
+    case "home":
+      return data === "\x1b[H" || data === "\x1b[1~" || data === "\x1bOH" || data === "home";
+    case "end":
+      return data === "\x1b[F" || data === "\x1b[4~" || data === "\x1bOF" || data === "end";
+    case "enter":
+      return data === "\r" || data === "\n" || data === "enter";
+    default:
+      return false;
+  }
+}
 
 /**
  * Attention item reason badges for panel rendering.
@@ -49,6 +96,7 @@ export class AttentionQueuePanel implements Component, Focusable {
   private title: string;
   private maxHeight?: number;
   private onChangeCallback?: () => void;
+  private onSelectCallback?: (item: AttentionItem) => void;
 
   constructor(options?: AttentionQueuePanelOptions) {
     this.title = options?.title ?? "Attention Queue";
@@ -72,6 +120,11 @@ export class AttentionQueuePanel implements Component, Focusable {
   /** Register a callback invoked whenever data changes. */
   onChange(cb: () => void): void {
     this.onChangeCallback = cb;
+  }
+
+  /** Register a callback invoked when Enter is pressed on a selected item. */
+  onSelect(cb: (item: AttentionItem) => void): void {
+    this.onSelectCallback = cb;
   }
 
   /** Render the panel into an array of lines for the given viewport width. */
@@ -114,7 +167,7 @@ export class AttentionQueuePanel implements Component, Focusable {
       let rowsRendered = 0;
 
       for (let i = 0; i < this.items.length; i++) {
-        if (rowsRendered + 2 > maxRows) break;
+        if (rowsRendered + 3 > maxRows) break;
         const item = this.items[i];
         const selected = i === this.selectedIndex;
 
@@ -123,11 +176,12 @@ export class AttentionQueuePanel implements Component, Focusable {
 
         const row1 = `${prefix}${badge} ${item.sessionId} · ${item.reason}`;
         const row2 = `    ${ANSI.dim}${item.message}${ANSI.reset}`;
+        const row3 = `    ${ANSI.dim}Next: ${item.recommendedAction}${ANSI.reset}`;
 
         lines.push(row(row1));
-        rowsRendered++;
         lines.push(row(row2));
-        rowsRendered++;
+        lines.push(row(row3));
+        rowsRendered += 3;
       }
     }
 
@@ -175,7 +229,10 @@ export class AttentionQueuePanel implements Component, Focusable {
       this.selectedIndex = Math.max(0, this.items.length - 1);
       this.onChangeCallback?.();
     } else if (matchesKey(data, "enter")) {
-      this.onChangeCallback?.();
+      const selected = this.getSelectedItem();
+      if (selected && this.onSelectCallback) {
+        this.onSelectCallback(selected);
+      }
     }
   }
 
@@ -186,5 +243,6 @@ export class AttentionQueuePanel implements Component, Focusable {
 
   dispose(): void {
     this.onChangeCallback = undefined;
+    this.onSelectCallback = undefined;
   }
 }

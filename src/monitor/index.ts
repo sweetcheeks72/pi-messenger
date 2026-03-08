@@ -39,6 +39,9 @@ export * from "./store/index.js";
 export * from "./types/attention.js";
 export * from "./types/operator.js";
 
+// Attention derivation
+export { deriveAttentionItems } from "./attention/derivation.js";
+
 // Session types — export new canonical names; omit backward-compat SessionEvent/SessionEventSchema
 // aliases to avoid conflict with the richer types from events/index.js.
 export type {
@@ -60,6 +63,7 @@ export {
 // UI rendering components — export selectively to avoid re-exporting HealthStatus
 // (already exported by health/index.js above).
 export { SessionMonitorPanel, type SessionMonitorPanelOptions } from "./ui/panel.js";
+export { AttentionQueuePanel, type AttentionQueuePanelOptions } from "./ui/attention.js";
 export {
   renderSessionRow,
   renderStatusBadge,
@@ -73,5 +77,14 @@ export {
   ANSI,
   type SessionGroup,
 } from "./ui/render.js";
+export {
+  renderSessionRow as renderSharedSessionRow,
+  renderFreshnessBadge,
+  renderAttentionBadge,
+  formatFreshness,
+  stripAnsi as stripSessionRowAnsi,
+  ANSI as SESSION_ROW_ANSI,
+  type SessionRowData,
+} from "./ui/session-row.js";
 export * from "./ui/inspector.js";
 export { SessionDetailView, renderSessionDetailView, stripDetailAnsi } from "./ui/session-detail.js";
