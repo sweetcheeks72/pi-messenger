@@ -19,6 +19,7 @@ vi.mock("@mariozechner/pi-tui", () => ({
 }));
 import { MessengerOverlay } from "../../../overlay.js";
 import { renderMonitorView } from "../../../overlay-render.js";
+import type { CrewViewState } from "../../../overlay-actions.js";
 import type { Dirs, MessengerState } from "../../../lib.js";
 import { MonitorRegistry } from "../../../src/monitor/registry.js";
 
@@ -72,6 +73,30 @@ function makeTui() {
 }
 
 describe("overlay monitor attention wiring", () => {
+  it("does not start the health monitor on construct; registry disposal stops it", () => {
+    const registry = makeRegistry();
+    const startSpy = vi.spyOn(registry.healthMonitor, "start");
+    const stopSpy = vi.spyOn(registry.healthMonitor, "stop");
+
+    const overlay = new MessengerOverlay(
+      makeTui() as any,
+      makeTheme() as any,
+      makeState(),
+      makeDirs(),
+      () => {},
+      {},
+      registry,
+    );
+
+    expect(startSpy).not.toHaveBeenCalled();
+
+    overlay.dispose();
+    expect(stopSpy).not.toHaveBeenCalled();
+
+    registry.dispose();
+    expect(stopSpy).toHaveBeenCalled();
+  });
+
   it("renders the attention queue panel above the session list when actionable items exist", () => {
     const registry = makeRegistry();
 
@@ -94,7 +119,7 @@ describe("overlay monitor attention wiring", () => {
     });
     registry.lifecycle.pause(pausedId, "waiting for operator input");
 
-    const viewState = {
+    const viewState: CrewViewState = {
       scrollOffset: 0,
       selectedTaskIndex: 0,
       mode: "monitor",
@@ -115,7 +140,7 @@ describe("overlay monitor attention wiring", () => {
       scrollLocked: false,
       monitorSelectedIndex: 0,
       monitorDetailScroll: 0,
-    } as const;
+    };
 
     const lines = renderMonitorView(registry, 100, 30, { ...viewState });
     const text = lines.join("\n");
@@ -166,6 +191,52 @@ describe("overlay monitor attention wiring", () => {
     const crewViewState = (overlay as any).crewViewState;
     expect(crewViewState.mode).toBe("monitor-detail");
     expect(crewViewState.monitorSelectedIndex).toBe(1);
+
+    overlay.dispose();
+    registry.dispose();
+  });
+
+  it("falls back to the session list selection when the attention panel has no internal health-map item", () => {
+    const registry = makeRegistry();
+
+    registry.lifecycle.start({
+      id: "sess-healthy",
+      name: "Healthy Session",
+      cwd: "/tmp",
+      model: "claude-3",
+      startedAt: new Date().toISOString(),
+      agent: "WorkerA",
+    });
+
+    registry.lifecycle.start({
+      id: "sess-stale",
+      name: "Stale Session",
+      cwd: "/tmp",
+      model: "claude-3",
+      startedAt: new Date(Date.now() - 31_000).toISOString(),
+      agent: "WorkerB",
+    });
+
+    const overlay = new MessengerOverlay(
+      makeTui() as any,
+      makeTheme() as any,
+      makeState(),
+      makeDirs(),
+      () => {},
+      {},
+      registry,
+    );
+
+    (overlay as any).crewViewState.mode = "monitor";
+    const text = overlay.render(100).join("\n");
+    expect(text).toContain("Attention");
+    expect(text).toContain("sess-stale");
+
+    overlay.handleInput("\r");
+
+    const crewViewState = (overlay as any).crewViewState;
+    expect(crewViewState.mode).toBe("monitor-detail");
+    expect(crewViewState.monitorSelectedIndex).toBe(0);
 
     overlay.dispose();
     registry.dispose();

@@ -1,6 +1,5 @@
 // Tests for handleMonitorDetailKeyBinding, handleConfirmInput (end-session), and renderLegend monitor-detail mode
 
-// ─── Mocks for overlay-actions.ts / overlay-render.ts dependencies ───────────
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@mariozechner/pi-tui", () => ({
@@ -9,104 +8,9 @@ vi.mock("@mariozechner/pi-tui", () => ({
   matchesKey: (data: string, key: string) => data === key,
 }));
 
-vi.mock("../../../lib.js", () => ({
-  formatDuration: (ms: number) => `${ms}ms`,
-  formatRelativeTime: (_t: string) => "just now",
-  buildSelfRegistration: () => ({}),
-  coloredAgentName: (name: string) => name,
-  computeStatus: () => "idle",
-  STATUS_INDICATORS: {},
-  agentHasTask: () => false,
-  estimateCost: () => 0,
-  formatCost: () => "",
-  renderProgressBar: () => "[]",
-  getSpinnerFrame: () => "⠋",
-  getToolIcon: () => "🔧",
-  renderSparkline: () => "",
-  renderFileTree: () => [],
-  renderAgentPipeline: () => "",
-  renderDiffStatsBar: () => "",
-  extractFolder: (s: string) => s,
-}));
-
-vi.mock("../../../store.js", () => ({
-  getActiveAgents: () => [],
-  getClaims: () => ({}),
-  getRegisteredAgents: () => [],
-}));
-
-vi.mock("../../../crew/store.js", () => ({
-  getTasks: () => [],
-  getTask: () => undefined,
-  getPlan: () => null,
-  getPlanLabel: () => "",
-  getCrewDir: (cwd: string) => cwd,
-  hasPlan: () => false,
-  getReadyTasks: () => [],
-}));
-
-vi.mock("../../../crew/state.js", () => ({
-  autonomousState: { concurrency: 1, waveNumber: 0, startedAt: null },
-  getPlanningUpdateAgeMs: () => 0,
-  isAutonomousForCwd: () => false,
-  isPlanningForCwd: () => false,
-  isPlanningStalled: () => false,
-  planningState: { pass: 0, maxPasses: 5, phase: "idle", updatedAt: null },
-  PLANNING_STALE_TIMEOUT_MS: 60000,
-  cancelPlanningRun: () => {},
-}));
-
-vi.mock("../../../crew/live-progress.js", () => ({
-  getLiveWorkers: () => new Map(),
-  hasLiveWorkers: () => false,
-}));
-
-vi.mock("../../../feed.js", () => ({
-  formatFeedLine: () => "",
-  logFeedEvent: () => {},
-}));
-
-vi.mock("../../../crew/utils/discover.js", () => ({
-  discoverCrewAgents: () => [],
-}));
-
-vi.mock("../../../config.js", () => ({
-  loadConfig: () => ({ stuckThreshold: 300 }),
-}));
-
-vi.mock("../../../crew/utils/config.js", () => ({
-  loadCrewConfig: () => ({
-    coordination: "light",
-    dependencies: "strict",
-    concurrency: { max: 4 },
-  }),
-}));
-
-vi.mock("../../../crew/utils/checkpoint.js", () => ({
-  listCheckpoints: () => [],
-  getCheckpointDiff: () => null,
-  restoreCheckpoint: () => false,
-}));
-
-vi.mock("../../../crew/lobby.js", () => ({
-  getLobbyWorkerCount: () => 0,
-}));
-
-vi.mock("../../../crew/registry.js", () => ({
-  hasActiveWorker: () => false,
-}));
-
-vi.mock("../../../crew/task-actions.js", () => ({
-  executeTaskAction: () => ({ success: true, message: "ok" }),
-}));
-
-// ─── Actual test imports ──────────────────────────────────────────────────────
-
 import { handleMonitorDetailKeyBinding, handleConfirmInput, type CrewViewState } from "../../../overlay-actions.js";
 import { renderLegend } from "../../../overlay-render.js";
 import { MonitorRegistry } from "../../../src/monitor/registry.js";
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function makeViewState(overrides?: Partial<CrewViewState>): CrewViewState {
   return {
@@ -164,8 +68,6 @@ function startSession(registry: MonitorRegistry, id: string, name: string) {
   return id;
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
-
 describe("handleMonitorDetailKeyBinding", () => {
   let registry: MonitorRegistry;
 
@@ -175,11 +77,9 @@ describe("handleMonitorDetailKeyBinding", () => {
 
   it("1. 'p' on active session → calls pause", () => {
     const sessionId = startSession(registry, "sess-active", "Active Session");
-    // session starts as "active"
     const viewState = makeViewState({ monitorSelectedIndex: 0 });
     const tui = makeTUI();
 
-    // spy on commandHandler.execute
     const executeSpy = vi.spyOn(registry.commandHandler, "execute");
     executeSpy.mockReturnValue({ success: true });
 
@@ -194,7 +94,6 @@ describe("handleMonitorDetailKeyBinding", () => {
 
   it("2. 'p' on paused session → calls resume", () => {
     const sessionId = startSession(registry, "sess-paused", "Paused Session");
-    // Pause it first
     registry.commandHandler.execute({ action: "pause", sessionId });
 
     const viewState = makeViewState({ monitorSelectedIndex: 0 });
