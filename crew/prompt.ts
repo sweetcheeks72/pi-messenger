@@ -5,6 +5,8 @@
  * Pure function: reads from store, returns a string.
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { Task } from "./types.js";
 import type { CrewConfig } from "./utils/config.js";
 import * as store from "./store.js";
@@ -79,6 +81,12 @@ These tasks are already complete - you can reference their implementations.
 
 `;
     }
+
+    // Inject handoff briefs from completed dependencies
+    const handoffBriefs = buildHandoffBriefSection(cwd, task);
+    if (handoffBriefs) {
+      prompt += handoffBriefs;
+    }
   }
 
   const coordContext = buildCoordinationContext(cwd, task, config, concurrentTasks);
@@ -110,4 +118,37 @@ ${truncatedSpec}
   }
 
   return prompt;
+}
+
+/**
+ * Build a section containing handoff briefs from completed dependency tasks.
+ * Reads handoff artifacts from {crewDir}/artifacts/{depId}-handoff.md for each
+ * done dependency.
+ */
+function buildHandoffBriefSection(cwd: string, task: Task): string | null {
+  if (task.depends_on.length === 0) return null;
+
+  const crewDir = store.getCrewDir(cwd);
+  const briefs: string[] = [];
+
+  for (const depId of task.depends_on) {
+    const dep = store.getTask(cwd, depId);
+    if (!dep || dep.status !== "done") continue;
+
+    const handoffPath = path.join(crewDir, "artifacts", `${depId}-handoff.md`);
+    if (!fs.existsSync(handoffPath)) continue;
+
+    try {
+      const content = fs.readFileSync(handoffPath, "utf-8").trim();
+      if (content.length > 0) {
+        briefs.push(`### ${depId}: ${dep.title}\n\n${content}`);
+      }
+    } catch {
+      // Skip unreadable files
+    }
+  }
+
+  if (briefs.length === 0) return null;
+
+  return `## Handoff Briefs from Dependencies\n\n${briefs.join("\n\n---\n\n")}\n\n`;
 }

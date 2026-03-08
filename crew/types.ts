@@ -124,6 +124,13 @@ export interface CrewParams {
   concurrency?: number;
   model?: string;
 
+  // Handoff
+  handoffBrief?: {
+    changes: string[];
+    assumptions: string[];
+    warnings: string[];
+  };
+
   // Task reset
   cascade?: boolean;
   force?: boolean;
