@@ -396,7 +396,7 @@ function taskStart(cwd: string, params: CrewParams, state: MessengerState, names
   }
 
   const agentName = state.agentName || "unknown";
-  const actionResult = executeTaskAction(cwd, "start", id, agentName, namespace);
+  const actionResult = executeTaskAction(cwd, "start", id, agentName, undefined, { namespace });
   if (!actionResult.success || !actionResult.task) {
     return result(`Error: ${actionResult.message}`, {
       mode: "task.start",
@@ -551,7 +551,7 @@ function taskBlock(cwd: string, params: CrewParams, state: MessengerState, names
     return result("Error: reason required for task.block", { mode: "task.block", error: "missing_reason" });
   }
 
-  const actionResult = executeTaskAction(cwd, "block", id, state.agentName || "unknown", namespace, params.reason);
+  const actionResult = executeTaskAction(cwd, "block", id, state.agentName || "unknown", params.reason, { namespace: namespace });
   if (!actionResult.success || !actionResult.task) {
     return result(`Error: ${actionResult.message}`, {
       mode: "task.block",
@@ -588,7 +588,7 @@ function taskUnblock(cwd: string, params: CrewParams, state: MessengerState, nam
     return result("Error: id required for task.unblock", { mode: "task.unblock", error: "missing_id" });
   }
 
-  const actionResult = executeTaskAction(cwd, "unblock", id, state.agentName || "unknown", namespace);
+  const actionResult = executeTaskAction(cwd, "unblock", id, state.agentName || "unknown", undefined, { namespace });
   if (!actionResult.success || !actionResult.task) {
     return result(`Error: ${actionResult.message}`, {
       mode: "task.unblock",
@@ -679,7 +679,7 @@ function taskReset(cwd: string, params: CrewParams, state: MessengerState, names
 
   const cascade = params.cascade ?? false;
   const action = cascade ? "cascade-reset" : "reset";
-  const actionResult = executeTaskAction(cwd, action, id, state.agentName || "unknown", namespace);
+  const actionResult = executeTaskAction(cwd, action, id, state.agentName || "unknown", undefined, { namespace });
   if (!actionResult.success) {
     return result(`Error: ${actionResult.message}`, {
       mode: "task.reset",

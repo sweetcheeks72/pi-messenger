@@ -48,9 +48,13 @@ export class SessionHealthMonitor {
     this.emitter = emitter;
     this.aggregator = aggregator;
 
-    // Track last event timestamps via emitter subscription
+    // Track last event timestamps via emitter subscription.
+    // Exclude health.alert events (emitted by this monitor) so they don't
+    // reset the idle timer and prevent correct degraded→critical escalation.
     this.emitter.subscribe((event) => {
-      this.lastEventAt.set(event.sessionId, event.timestamp);
+      if (event.type !== "health.alert") {
+        this.lastEventAt.set(event.sessionId, event.timestamp);
+      }
     });
   }
 
