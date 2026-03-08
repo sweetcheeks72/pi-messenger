@@ -29,6 +29,8 @@ import {
   renderEmptyState,
   renderPlanningState,
   renderDetailView,
+  renderMonitorView,
+  renderMonitorDetailView,
   navigateTask,
 } from "./overlay-render.js";
 import {
@@ -271,7 +273,10 @@ export class MessengerOverlay implements Component, Focusable {
     }
 
     if (matchesKey(data, "escape")) {
-      if (this.crewViewState.mode === "detail") {
+      if (this.crewViewState.mode === "monitor-detail") {
+        this.crewViewState.mode = "monitor";
+        this.tui.requestRender();
+      } else if (this.crewViewState.mode === "detail" || this.crewViewState.mode === "monitor") {
         this.crewViewState.mode = "list";
         this.tui.requestRender();
       } else {
@@ -309,14 +314,25 @@ export class MessengerOverlay implements Component, Focusable {
       return;
     }
 
-    if (data === "@" || matchesKey(data, "m")) {
+    if (matchesKey(data, "m")) {
+      if (this.crewViewState.mode === "monitor" || this.crewViewState.mode === "monitor-detail") {
+        this.crewViewState.mode = "list";
+      } else {
+        this.crewViewState.mode = "monitor";
+        this.crewViewState.monitorSelectedIndex = 0;
+      }
+      this.tui.requestRender();
+      return;
+    }
+
+    if (data === "@") {
       if (isPlanningForCwd(this.cwd)) {
         setNotification(this.crewViewState, this.tui, false, "Chat unavailable during planning");
         this.tui.requestRender();
         return;
       }
       this.crewViewState.inputMode = "message";
-      this.crewViewState.messageInput = data === "@" ? "@" : "";
+      this.crewViewState.messageInput = "@";
       this.tui.requestRender();
       return;
     }
@@ -375,6 +391,10 @@ export class MessengerOverlay implements Component, Focusable {
         this.crewViewState.detailScroll = Math.max(0, this.crewViewState.detailScroll - 1);
         this.crewViewState.detailAutoScroll = false;
         this.crewViewState.scrollLocked = true;
+      } else if (this.crewViewState.mode === "monitor") {
+        this.crewViewState.monitorSelectedIndex = Math.max(0, this.crewViewState.monitorSelectedIndex - 1);
+      } else if (this.crewViewState.mode === "monitor-detail") {
+        this.crewViewState.monitorDetailScroll = Math.max(0, this.crewViewState.monitorDetailScroll - 1);
       } else {
         navigateTask(this.crewViewState, -1, tasks.length);
       }
@@ -387,6 +407,10 @@ export class MessengerOverlay implements Component, Focusable {
         this.crewViewState.detailScroll++;
         this.crewViewState.detailAutoScroll = false;
         // Don't set scrollLocked on down — user might be scrolling to bottom
+      } else if (this.crewViewState.mode === "monitor") {
+        this.crewViewState.monitorSelectedIndex++;
+      } else if (this.crewViewState.mode === "monitor-detail") {
+        this.crewViewState.monitorDetailScroll++;
       } else {
         navigateTask(this.crewViewState, 1, tasks.length);
       }
@@ -417,7 +441,11 @@ export class MessengerOverlay implements Component, Focusable {
     }
 
     if (matchesKey(data, "enter")) {
-      if (task && this.crewViewState.mode !== "detail") {
+      if (this.crewViewState.mode === "monitor") {
+        this.crewViewState.mode = "monitor-detail";
+        this.crewViewState.monitorDetailScroll = 0;
+        this.tui.requestRender();
+      } else if (task && this.crewViewState.mode !== "detail") {
         this.crewViewState.mode = "detail";
         this.crewViewState.detailScroll = 0;
         this.crewViewState.detailAutoScroll = true;
@@ -614,7 +642,11 @@ export class MessengerOverlay implements Component, Focusable {
     this.checkCompletion(tasks, planning);
 
     let contentLines: string[];
-    if (this.crewViewState.mode === "detail" && selectedTask) {
+    if (this.crewViewState.mode === "monitor-detail") {
+      contentLines = renderMonitorDetailView(this.registry, sectionW, contentHeight, this.crewViewState);
+    } else if (this.crewViewState.mode === "monitor") {
+      contentLines = renderMonitorView(this.registry, sectionW, contentHeight, this.crewViewState);
+    } else if (this.crewViewState.mode === "detail" && selectedTask) {
       contentLines = renderDetailView(this.cwd, selectedTask, sectionW, contentHeight, this.crewViewState);
     } else {
       const workersLimit = termRows <= 26 ? 2 : 5;

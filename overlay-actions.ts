@@ -21,7 +21,7 @@ interface ConfirmAction {
 export interface CrewViewState {
   scrollOffset: number;
   selectedTaskIndex: number;
-  mode: "list" | "detail";
+  mode: "list" | "detail" | "monitor" | "monitor-detail";
   detailScroll: number;
   detailAutoScroll: boolean;
   confirmAction: ConfirmAction | null;
@@ -38,6 +38,10 @@ export interface CrewViewState {
   mentionIndex: number;
   /** Scroll lock: true when user has scrolled up (auto-scroll paused) */
   scrollLocked: boolean;
+  /** Selected session index in the monitor overview */
+  monitorSelectedIndex: number;
+  /** Scroll offset for monitor detail view */
+  monitorDetailScroll: number;
 }
 
 export function createCrewViewState(): CrewViewState {
@@ -60,6 +64,8 @@ export function createCrewViewState(): CrewViewState {
     mentionCandidates: [],
     mentionIndex: -1,
     scrollLocked: false,
+    monitorSelectedIndex: 0,
+    monitorDetailScroll: 0,
   };
 }
 

@@ -43,6 +43,10 @@ import { loadCrewConfig } from "./crew/utils/config.js";
 import { listCheckpoints, getCheckpointDiff } from "./crew/utils/checkpoint.js";
 import { getLobbyWorkerCount } from "./crew/lobby.js";
 import type { CrewViewState } from "./overlay-actions.js";
+import type { MonitorRegistry } from "./src/monitor/registry.js";
+import { renderGroupedSessions } from "./src/monitor/ui/render.js";
+import { renderSessionDetailView } from "./src/monitor/ui/session-detail.js";
+
 
 const STATUS_ICONS: Record<string, string> = { done: "✓", in_progress: "●", todo: "○", blocked: "✗" };
 
@@ -536,7 +540,7 @@ export function renderLegend(
     );
   }
 
-  return truncateToWidth(scrollPrefix + theme.fg("dim", appendUniversalHints(`m:Chat  v:${coordHint(cwd)}  +/-:Wkrs  Esc:Close`)), width);
+  return truncateToWidth(scrollPrefix + theme.fg("dim", appendUniversalHints(`m:Monitor  @:Chat  v:${coordHint(cwd)}  +/-:Wkrs  Esc:Close`)), width);
 }
 
 export function renderDetailView(cwd: string, task: Task, width: number, height: number, viewState: CrewViewState): string[] {
@@ -755,7 +759,7 @@ function renderDetailStatusBar(cwd: string, task: Task): string {
       if (checkpoints.some(cp => cp.label === "pre")) hints.push("C:Restore");
     } catch { /* ignore */ }
   }
-  if (!isPlanningForCwd(cwd)) hints.push("m:Chat");
+  if (!isPlanningForCwd(cwd)) hints.push("m:Monitor");
   hints.push(`v:${coordHint(cwd)}`, "f:Feed", "+/-:Wkrs", "←→:Nav");
   return hints.join("  ");
 }
@@ -770,7 +774,7 @@ function renderListStatusBar(cwd: string, task: Task): string {
   if (task.status === "in_progress") hints.push("b:Block");
   if (task.status !== "in_progress" && !task.milestone) hints.push("p:Revise");
   if (!(task.status === "in_progress" && hasLiveWorker(cwd, task.id))) hints.push("x:Del");
-  if (!isPlanningForCwd(cwd)) hints.push("m:Chat");
+  if (!isPlanningForCwd(cwd)) hints.push("m:Monitor");
   hints.push(`v:${coordHint(cwd)}`, "f:Feed", "+/-:Wkrs");
   return hints.join("  ");
 }
@@ -818,6 +822,59 @@ function renderTaskLine(theme: Theme, task: Task, isSelected: boolean, width: nu
 
   if (task.milestone) suffix += `${suffix ? " " : ""}· milestone`;
   return truncateToWidth(`${select}${coloredIcon} ${task.id}  ${task.title}${theme.fg("dim", suffix)}`, width);
+}
+
+
+export function renderMonitorView(
+  registry: MonitorRegistry | undefined,
+  width: number,
+  height: number,
+  viewState: CrewViewState,
+): string[] {
+  if (!registry) {
+    const lines: string[] = ["  No monitor registry available."];
+    while (lines.length < height) lines.push("");
+    return lines.slice(0, height);
+  }
+
+  const sessions = registry.store.list();
+  if (sessions.length === 0) {
+    const lines: string[] = ["  No active sessions."];
+    while (lines.length < height) lines.push("");
+    return lines.slice(0, height);
+  }
+
+  const clampedIndex = Math.max(0, Math.min(viewState.monitorSelectedIndex, sessions.length - 1));
+  viewState.monitorSelectedIndex = clampedIndex;
+
+  const allLines = renderGroupedSessions(sessions, clampedIndex, width);
+
+  const visible = allLines.slice(0, height);
+  while (visible.length < height) visible.push("");
+  return visible;
+}
+
+export function renderMonitorDetailView(
+  registry: MonitorRegistry | undefined,
+  width: number,
+  height: number,
+  viewState: CrewViewState,
+): string[] {
+  if (!registry) {
+    const lines: string[] = ["  No monitor registry available."];
+    while (lines.length < height) lines.push("");
+    return lines.slice(0, height);
+  }
+
+  const sessions = registry.store.list();
+  const session = sessions[viewState.monitorSelectedIndex];
+  if (!session) {
+    const lines: string[] = ["  Session not found."];
+    while (lines.length < height) lines.push("");
+    return lines.slice(0, height);
+  }
+
+  return renderSessionDetailView(session, "healthy", width, height, Date.now());
 }
 
 export function navigateTask(viewState: CrewViewState, direction: 1 | -1, taskCount: number): void {
