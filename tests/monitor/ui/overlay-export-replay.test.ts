@@ -1,6 +1,3 @@
-// task-13: overlay export and replay tests
-
-// ─── Mocks for overlay-render.ts dependencies ────────────────────────────────
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -12,92 +9,9 @@ vi.mock("@mariozechner/pi-tui", () => ({
   matchesKey: (_data: string, _key: string) => false,
 }));
 
-vi.mock("../../../lib.js", () => ({
-  formatDuration: (ms: number) => `${ms}ms`,
-  formatRelativeTime: (_t: string) => "just now",
-  buildSelfRegistration: () => ({}),
-  coloredAgentName: (name: string) => name,
-  computeStatus: () => "idle",
-  STATUS_INDICATORS: {},
-  agentHasTask: () => false,
-  estimateCost: () => 0,
-  formatCost: () => "",
-  renderProgressBar: () => "[]",
-  getSpinnerFrame: () => "⠋",
-  getToolIcon: () => "🔧",
-  renderSparkline: () => "",
-  renderFileTree: () => [],
-  renderAgentPipeline: () => "",
-  renderDiffStatsBar: () => "",
-  extractFolder: (s: string) => s,
-}));
-
-vi.mock("../../../store.js", () => ({
-  getActiveAgents: () => [],
-  getClaims: () => ({}),
-  getRegisteredAgents: () => [],
-}));
-
-vi.mock("../../../crew/store.js", () => ({
-  getTasks: () => [],
-  getTask: () => undefined,
-  getPlan: () => null,
-  getPlanLabel: () => "",
-  getCrewDir: (cwd: string) => cwd,
-  hasPlan: () => false,
-  getReadyTasks: () => [],
-}));
-
-vi.mock("../../../crew/state.js", () => ({
-  autonomousState: { concurrency: 1, waveNumber: 0, startedAt: null },
-  getPlanningUpdateAgeMs: () => 0,
-  isAutonomousForCwd: () => false,
-  isPlanningForCwd: () => false,
-  isPlanningStalled: () => false,
-  planningState: { pass: 0, maxPasses: 5, phase: "idle", updatedAt: null },
-  PLANNING_STALE_TIMEOUT_MS: 60000,
-}));
-
-vi.mock("../../../crew/live-progress.js", () => ({
-  getLiveWorkers: () => new Map(),
-  hasLiveWorkers: () => false,
-}));
-
-vi.mock("../../../feed.js", () => ({
-  formatFeedLine: () => "",
-}));
-
-vi.mock("../../../crew/utils/discover.js", () => ({
-  discoverCrewAgents: () => [],
-}));
-
-vi.mock("../../../config.js", () => ({
-  loadConfig: () => ({ stuckThreshold: 300 }),
-}));
-
-vi.mock("../../../crew/utils/config.js", () => ({
-  loadCrewConfig: () => ({
-    coordination: "light",
-    dependencies: "strict",
-    concurrency: { max: 4 },
-  }),
-}));
-
-vi.mock("../../../crew/utils/checkpoint.js", () => ({
-  listCheckpoints: () => [],
-  getCheckpointDiff: () => null,
-}));
-
-vi.mock("../../../crew/lobby.js", () => ({
-  getLobbyWorkerCount: () => 0,
-}));
-
-// ─── Actual test imports ──────────────────────────────────────────────────────
-
 import { renderReplayView } from "../../../overlay-render-replay.js";
 import { MonitorRegistry } from "../../../src/monitor/registry.js";
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+import { stripAnsi } from "../../../src/monitor/ui/render.js";
 
 function makeRegistry(): MonitorRegistry {
   return new MonitorRegistry({ healthConfig: {} });
@@ -107,124 +21,134 @@ function startSession(registry: MonitorRegistry, id: string, name = "TestAgent")
   registry.lifecycle.start({
     id,
     name,
-    cwd: "/tmp",
+    cwd: "/tmp/project",
     model: "claude-3",
-    startedAt: new Date().toISOString(),
+    startedAt: new Date("2026-03-08T12:00:00.000Z").toISOString(),
     agent: name,
   });
 }
 
-function endSession(registry: MonitorRegistry, id: string): void {
-  registry.lifecycle.end(id);
+function endSession(registry: MonitorRegistry, id: string, summary = "done"): void {
+  registry.lifecycle.end(id, summary);
 }
 
-// ─── renderReplayView tests ───────────────────────────────────────────────────
-
 describe("renderReplayView", () => {
-  it("returns error lines for an unknown sessionId", () => {
+  it("renders an idle replay header and empty-state timeline for an unknown session", () => {
     const registry = makeRegistry();
     const lines = renderReplayView(registry, "nonexistent-session", 80, 10, 0);
+    const text = stripAnsi(lines.join("\n"));
+
     expect(lines).toHaveLength(10);
-    const text = lines.join("\n");
-    // Should either show an error message or empty replay (replayer returns empty state, not throws)
-    expect(text).toBeTruthy();
+    expect(text).toContain("── Replay: unknown");
+    expect(text).toContain("(nonexistent-session)");
+    expect(text).toContain("Status: idle");
+    expect(text).toContain("Events: 0");
+    expect(text).toContain("(no events recorded)");
     registry.dispose();
   });
 
-  it("renders replay timeline for a started session", () => {
+  it("renders replay timeline entries for a started session", () => {
     const registry = makeRegistry();
     startSession(registry, "sess-replay-1", "ReplayAgent");
+
     const lines = renderReplayView(registry, "sess-replay-1", 80, 20, 0);
+    const text = stripAnsi(lines.join("\n"));
+
     expect(lines).toHaveLength(20);
-    const text = lines.join("\n");
-    expect(text).toContain("Replay");
+    expect(text).toContain("── Replay: ReplayAgent");
+    expect(text).toContain("Status: active");
+    expect(text).toContain("Events: 1");
+    expect(text).toContain("session.start");
     registry.dispose();
   });
 
-  it("renders replay timeline for a completed session", () => {
+  it("renders ended status and both lifecycle events for a completed session", () => {
     const registry = makeRegistry();
     startSession(registry, "sess-replay-2", "CompletedAgent");
-    endSession(registry, "sess-replay-2");
-    const lines = renderReplayView(registry, "sess-replay-2", 80, 20, 0);
-    expect(lines).toHaveLength(20);
-    const text = lines.join("\n");
-    expect(text).toContain("Replay");
-    // Should show "ended" status
-    expect(text).toContain("ended");
+    endSession(registry, "sess-replay-2", "completed successfully");
+
+    const text = stripAnsi(renderReplayView(registry, "sess-replay-2", 80, 20, 0).join("\n"));
+
+    expect(text).toContain("── Replay: CompletedAgent");
+    expect(text).toContain("Status: ended");
+    expect(text).toContain("Events: 2");
+    expect(text).toContain("session.start");
+    expect(text).toContain("session.end");
     registry.dispose();
   });
 
   it("pads output to the requested height", () => {
     const registry = makeRegistry();
     startSession(registry, "sess-replay-pad");
+
     const lines = renderReplayView(registry, "sess-replay-pad", 80, 15, 0);
+
     expect(lines).toHaveLength(15);
+    expect(lines.at(-1)).toBe("");
     registry.dispose();
   });
 
-  it("applies scroll offset correctly", () => {
+  it("applies scroll offset by dropping the replay header lines", () => {
     const registry = makeRegistry();
-    startSession(registry, "sess-replay-scroll");
-    // Full view at scroll 0
+    startSession(registry, "sess-replay-scroll", "ScrollAgent");
+    endSession(registry, "sess-replay-scroll");
+
     const linesNoScroll = renderReplayView(registry, "sess-replay-scroll", 80, 20, 0);
-    // Scrolled view (skip first 2 lines)
     const linesScrolled = renderReplayView(registry, "sess-replay-scroll", 80, 20, 2);
-    // Content should differ (scrolled skips header lines)
-    // Just verify it returns the correct count and doesn't throw
-    expect(linesScrolled).toHaveLength(20);
+
+    expect(stripAnsi(linesNoScroll[0])).toContain("── Replay: ScrollAgent");
+    expect(stripAnsi(linesScrolled[0])).toContain("Agent:");
+    expect(stripAnsi(linesScrolled.join("\n"))).not.toContain("── Replay: ScrollAgent");
     registry.dispose();
   });
 
-  it("shows session name and id in header", () => {
+  it("shows the session id in the replay header", () => {
     const registry = makeRegistry();
     startSession(registry, "my-session-id", "MyAgent");
-    const lines = renderReplayView(registry, "my-session-id", 80, 20, 0);
-    const text = lines.join("\n");
-    expect(text).toContain("my-session-id");
-    registry.dispose();
-  });
 
-  it("shows event timeline entries when events exist", () => {
-    const registry = makeRegistry();
-    startSession(registry, "sess-events");
-    // start event should be in history
-    const lines = renderReplayView(registry, "sess-events", 80, 30, 0);
-    const text = lines.join("\n");
-    // The session.start event should appear in timeline
-    expect(text).toContain("session.start");
+    const text = stripAnsi(renderReplayView(registry, "my-session-id", 80, 20, 0).join("\n"));
+
+    expect(text).toContain("(my-session-id)");
+    expect(text).toContain("Agent:");
     registry.dispose();
   });
 });
 
-// ─── Session export tests ─────────────────────────────────────────────────────
-
-describe("SessionExporter integration (exportSession to .pi/messenger/exports/)", () => {
+describe("SessionExporter integration", () => {
   let tmpDir: string;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-export-test-"));
   });
 
-  it("toJSON produces valid JSON with session and events", () => {
+  it("toJSON produces concrete session metadata and lifecycle events", () => {
     const registry = makeRegistry();
     startSession(registry, "export-sess-1", "ExportAgent");
     endSession(registry, "export-sess-1");
 
-    const json = registry.exporter.toJSON("export-sess-1");
-    const parsed = JSON.parse(json);
-    expect(parsed).toHaveProperty("session");
-    expect(parsed).toHaveProperty("events");
-    expect(parsed.session.metadata.id).toBe("export-sess-1");
+    const parsed = JSON.parse(registry.exporter.toJSON("export-sess-1"));
+
+    expect(parsed.session.metadata).toMatchObject({
+      id: "export-sess-1",
+      name: "ExportAgent",
+      agent: "ExportAgent",
+      cwd: "/tmp/project",
+      model: "claude-3",
+    });
+    expect(parsed.events.map((event: { type: string }) => event.type)).toEqual([
+      "session.start",
+      "session.end",
+    ]);
     registry.dispose();
   });
 
-  it("toJSON throws for unknown session", () => {
+  it("toJSON throws for unknown sessions", () => {
     const registry = makeRegistry();
     expect(() => registry.exporter.toJSON("no-such-session")).toThrow("Session not found");
     registry.dispose();
   });
 
-  it("exportAll writes JSON file to directory", () => {
+  it("exportAll writes the requested session JSON to disk", () => {
     const registry = makeRegistry();
     startSession(registry, "export-sess-2", "ExportAgent2");
     endSession(registry, "export-sess-2");
@@ -233,75 +157,115 @@ describe("SessionExporter integration (exportSession to .pi/messenger/exports/)"
     registry.exporter.exportAll(exportsDir, "json", ["export-sess-2"]);
 
     const expectedFile = path.join(exportsDir, "export-sess-2.json");
+    const parsed = JSON.parse(fs.readFileSync(expectedFile, "utf-8"));
+
     expect(fs.existsSync(expectedFile)).toBe(true);
-    const content = fs.readFileSync(expectedFile, "utf-8");
-    const parsed = JSON.parse(content);
     expect(parsed.session.metadata.id).toBe("export-sess-2");
-    registry.dispose();
-  });
-
-  it("toJSON includes session.start event in events array", () => {
-    const registry = makeRegistry();
-    startSession(registry, "export-with-events", "EventAgent");
-
-    const json = registry.exporter.toJSON("export-with-events");
-    const parsed = JSON.parse(json);
-    expect(parsed.events.length).toBeGreaterThan(0);
-    const types = (parsed.events as Array<{ type: string }>).map((e) => e.type);
-    expect(types).toContain("session.start");
+    expect(parsed.events.map((event: { type: string }) => event.type)).toEqual([
+      "session.start",
+      "session.end",
+    ]);
     registry.dispose();
   });
 });
 
-// ─── SessionReplayer integration tests ───────────────────────────────────────
-
-describe("SessionReplayer.replay()", () => {
-  it("returns empty/idle state for unknown session", () => {
+describe("SessionReplayer.replay", () => {
+  it("returns an idle state with unknown metadata for an unknown session", () => {
     const registry = makeRegistry();
     const state = registry.replayer.replay("no-such-session");
-    // Should return a state object (not throw) - replayer builds from empty events
-    expect(state).toBeDefined();
-    expect(state.status).toBe("idle");
+
+    expect(state).toMatchObject({
+      status: "idle",
+      metadata: {
+        id: "no-such-session",
+        name: "unknown",
+        agent: "unknown",
+        model: "unknown",
+      },
+      metrics: {
+        eventCount: 0,
+        errorCount: 0,
+        toolCalls: 0,
+      },
+    });
+    expect(state.events).toEqual([]);
     registry.dispose();
   });
 
-  it("returns active state for a started session", () => {
+  it("projects live history into replayed metrics and event ordering", () => {
     const registry = makeRegistry();
-    startSession(registry, "replay-active");
-    const state = registry.replayer.replay("replay-active");
-    expect(state.status).toBe("active");
-    registry.dispose();
-  });
+    startSession(registry, "replay-live-history", "ReplayAgent");
+    registry.emitter.emit({
+      id: "tool-1",
+      type: "tool.call",
+      sessionId: "replay-live-history",
+      timestamp: Date.parse("2026-03-08T12:00:05.000Z"),
+      sequence: 0,
+      payload: { type: "tool.call", toolName: "bash" },
+    });
+    registry.emitter.emit({
+      id: "tool-2",
+      type: "tool.call",
+      sessionId: "replay-live-history",
+      timestamp: Date.parse("2026-03-08T12:00:10.000Z"),
+      sequence: 0,
+      payload: { type: "tool.call", toolName: "grep" },
+    });
+    endSession(registry, "replay-live-history");
 
-  it("returns ended state for a completed session", () => {
-    const registry = makeRegistry();
-    startSession(registry, "replay-ended");
-    endSession(registry, "replay-ended");
-    const state = registry.replayer.replay("replay-ended");
+    const state = registry.replayer.replay("replay-live-history");
+
     expect(state.status).toBe("ended");
+    expect(state.metrics).toMatchObject({
+      eventCount: 4,
+      errorCount: 0,
+      toolCalls: 2,
+    });
+    expect(state.events.map((event) => event.type)).toEqual([
+      "session.start",
+      "tool.call",
+      "tool.call",
+      "session.end",
+    ]);
+    expect(state.events[1]).toMatchObject({
+      type: "tool.call",
+      data: { type: "tool.call", toolName: "bash" },
+    });
+    expect(state.events[2]).toMatchObject({
+      type: "tool.call",
+      data: { type: "tool.call", toolName: "grep" },
+    });
     registry.dispose();
   });
 
-  it("includes session.start and session.end events in replayed state", () => {
+  it("replay up to a sequence projects a partial lifecycle state", () => {
     const registry = makeRegistry();
-    startSession(registry, "replay-events");
-    endSession(registry, "replay-events");
-    const state = registry.replayer.replay("replay-events");
-    const types = state.events.map((e: { type: string }) => e.type);
-    expect(types).toContain("session.start");
-    expect(types).toContain("session.end");
-    registry.dispose();
-  });
+    startSession(registry, "replay-partial", "PartialAgent");
+    registry.emitter.emit({
+      id: "tool-partial",
+      type: "tool.call",
+      sessionId: "replay-partial",
+      timestamp: Date.parse("2026-03-08T12:00:05.000Z"),
+      sequence: 0,
+      payload: { type: "tool.call", toolName: "read" },
+    });
+    endSession(registry, "replay-partial", "finished");
 
-  it("replay up to sequence produces partial state", () => {
-    const registry = makeRegistry();
-    startSession(registry, "replay-partial");
-    endSession(registry, "replay-partial");
-    // Replay only first event (sequence 0 or 1)
     const fullState = registry.replayer.replay("replay-partial");
-    const partialState = registry.replayer.replay("replay-partial", 0);
-    // Partial has fewer events than full
-    expect(partialState.events.length).toBeLessThanOrEqual(fullState.events.length);
+    const partialState = registry.replayer.replay("replay-partial", 1);
+
+    expect(fullState.status).toBe("ended");
+    expect(fullState.events.map((event) => event.type)).toEqual([
+      "session.start",
+      "tool.call",
+      "session.end",
+    ]);
+    expect(partialState.status).toBe("active");
+    expect(partialState.events.map((event) => event.type)).toEqual([
+      "session.start",
+      "tool.call",
+    ]);
+    expect(partialState.metrics).toMatchObject({ eventCount: 2, toolCalls: 1 });
     registry.dispose();
   });
 });

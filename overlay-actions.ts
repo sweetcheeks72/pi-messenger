@@ -571,14 +571,17 @@ export function handleMonitorDetailKeyBinding(
 
   const sessionId = session.metadata.id;
   const status = session.status;
+  const liveWorkerBacked = Boolean(session.metadata.taskId) && hasActiveWorker(session.metadata.cwd, session.metadata.taskId!);
 
   if (matchesKey(data, "p")) {
-    if (status === "active") {
+    if (liveWorkerBacked) {
+      setNotification(viewState, tui, false, "Pause/resume are monitor-only and unavailable for a live worker session");
+    } else if (status === "active") {
       const result = registry.commandHandler.execute({ action: "pause", sessionId });
-      setNotification(viewState, tui, result.success, result.success ? "Session paused" : (result.error ?? "Failed to pause"));
+      setNotification(viewState, tui, result.success, result.success ? "Monitor session paused" : (result.error ?? "Failed to pause"));
     } else if (status === "paused") {
       const result = registry.commandHandler.execute({ action: "resume", sessionId });
-      setNotification(viewState, tui, result.success, result.success ? "Session resumed" : (result.error ?? "Failed to resume"));
+      setNotification(viewState, tui, result.success, result.success ? "Monitor session resumed" : (result.error ?? "Failed to resume"));
     } else {
       setNotification(viewState, tui, false, `Cannot pause/resume: session is ${status}`);
     }
@@ -605,9 +608,9 @@ export function handleMonitorDetailKeyBinding(
     const result = registry.commandHandler.execute({ action: "inspect", sessionId });
     if (result.success) {
       const info = `${session.metadata.name} | ${status} | ${session.metrics.toolCalls} tools | ${session.metrics.errorCount} errors`;
-      setNotification(viewState, tui, true, `Inspect: ${info}`);
+      setNotification(viewState, tui, true, `Snapshot: ${info}`);
     } else {
-      setNotification(viewState, tui, false, result.error ?? "Inspect failed");
+      setNotification(viewState, tui, false, result.error ?? "Snapshot failed");
     }
     tui.requestRender();
     return;

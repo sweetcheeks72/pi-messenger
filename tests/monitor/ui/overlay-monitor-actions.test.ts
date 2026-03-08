@@ -1,6 +1,6 @@
 // Tests for handleMonitorDetailKeyBinding, handleConfirmInput (end-session), and renderLegend monitor-detail mode
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("@mariozechner/pi-tui", () => ({
   truncateToWidth: (s: string) => s,
@@ -11,6 +11,7 @@ vi.mock("@mariozechner/pi-tui", () => ({
 import { handleMonitorDetailKeyBinding, handleConfirmInput, type CrewViewState } from "../../../overlay-actions.js";
 import { renderLegend } from "../../../overlay-render.js";
 import { MonitorRegistry } from "../../../src/monitor/registry.js";
+import { registerWorker, killAll } from "../../../crew/registry.js";
 
 function makeViewState(overrides?: Partial<CrewViewState>): CrewViewState {
   return {
@@ -75,19 +76,38 @@ describe("handleMonitorDetailKeyBinding", () => {
     registry = makeRegistry();
   });
 
-  it("1. 'p' on active session → calls pause", () => {
-    const sessionId = startSession(registry, "sess-active", "Active Session");
+  afterEach(() => {
+    killAll();
+  });
+
+  it("1. 'p' on active live worker session → stays honest and does not fake pause", () => {
+    registerWorker({
+      type: "worker",
+      cwd: "/tmp",
+      taskId: "task-live",
+      name: "Live Worker",
+      proc: { exitCode: null, killed: false, kill: vi.fn() } as any,
+    });
+    const sessionId = registry.lifecycle.start({
+      id: "sess-active",
+      name: "Active Session",
+      cwd: "/tmp",
+      model: "claude-3",
+      startedAt: new Date().toISOString(),
+      agent: "TestAgent",
+      taskId: "task-live",
+    });
     const viewState = makeViewState({ monitorSelectedIndex: 0 });
     const tui = makeTUI();
 
     const executeSpy = vi.spyOn(registry.commandHandler, "execute");
-    executeSpy.mockReturnValue({ success: true, executedAt: new Date().toISOString() });
 
     handleMonitorDetailKeyBinding("p", viewState, registry, tui);
 
-    expect(executeSpy).toHaveBeenCalledWith({ action: "pause", sessionId });
+    expect(executeSpy).not.toHaveBeenCalled();
     expect(tui.requestRender).toHaveBeenCalled();
-    expect(viewState.notification?.message).toContain("paused");
+    expect(viewState.notification?.message).toContain("monitor-only");
+    expect(viewState.notification?.message).toContain("live worker");
 
     registry.dispose();
   });
@@ -155,7 +175,7 @@ describe("handleMonitorDetailKeyBinding", () => {
     registry.dispose();
   });
 
-  it("6. 'i' → calls inspect and shows notification", () => {
+  it("6. 'i' → calls inspect and labels the result as a snapshot", () => {
     const sessionId = startSession(registry, "sess-inspect", "Inspect Me");
     const viewState = makeViewState({ monitorSelectedIndex: 0 });
     const tui = makeTUI();
@@ -166,7 +186,7 @@ describe("handleMonitorDetailKeyBinding", () => {
     handleMonitorDetailKeyBinding("i", viewState, registry, tui);
 
     expect(executeSpy).toHaveBeenCalledWith({ action: "inspect", sessionId });
-    expect(viewState.notification?.message).toContain("Inspect:");
+    expect(viewState.notification?.message).toContain("Snapshot:");
     expect(tui.requestRender).toHaveBeenCalled();
 
     registry.dispose();
@@ -180,8 +200,28 @@ describe("handleConfirmInput (end-session)", () => {
     registry = makeRegistry();
   });
 
-  it("7. 'y' with end-session confirmAction → calls registry.commandHandler.execute end", () => {
-    startSession(registry, "sess-confirm-end", "Confirm End");
+  afterEach(() => {
+    killAll();
+  });
+
+  it("7. 'y' with end-session confirmAction → ends the session and stops a live worker", () => {
+    const kill = vi.fn();
+    registerWorker({
+      type: "worker",
+      cwd: "/tmp",
+      taskId: "task-confirm-end",
+      name: "Confirm Worker",
+      proc: { exitCode: null, killed: false, kill } as any,
+    });
+    registry.lifecycle.start({
+      id: "sess-confirm-end",
+      name: "Confirm End",
+      cwd: "/tmp",
+      model: "claude-3",
+      startedAt: new Date().toISOString(),
+      agent: "TestAgent",
+      taskId: "task-confirm-end",
+    });
     const viewState = makeViewState({
       confirmAction: {
         type: "end-session",
@@ -191,12 +231,10 @@ describe("handleConfirmInput (end-session)", () => {
     });
     const tui = makeTUI();
 
-    const executeSpy = vi.spyOn(registry.commandHandler, "execute");
-    executeSpy.mockReturnValue({ success: true, executedAt: new Date().toISOString() });
-
     handleConfirmInput("y", viewState, "/tmp", "TestAgent", tui, registry);
 
-    expect(executeSpy).toHaveBeenCalledWith({ action: "end", sessionId: "sess-confirm-end" });
+    expect(kill).toHaveBeenCalledWith("SIGTERM");
+    expect(registry.store.get("sess-confirm-end")?.status).toBe("ended");
     expect(viewState.confirmAction).toBeNull();
     expect(viewState.notification?.message).toContain("ended");
 
@@ -229,8 +267,27 @@ describe("renderLegend in monitor-detail mode", () => {
     registry = makeRegistry();
   });
 
-  it("9. without confirmAction → shows p/e/i hints", () => {
-    startSession(registry, "sess-legend", "Legend Session");
+  afterEach(() => {
+    killAll();
+  });
+
+  it("9. live worker sessions hide fake pause/resume hints and keep inspect honest", () => {
+    registerWorker({
+      type: "worker",
+      cwd: "/tmp",
+      taskId: "task-legend",
+      name: "Legend Worker",
+      proc: { exitCode: null, killed: false, kill: vi.fn() } as any,
+    });
+    registry.lifecycle.start({
+      id: "sess-legend",
+      name: "Legend Session",
+      cwd: "/tmp",
+      model: "claude-3",
+      startedAt: new Date().toISOString(),
+      agent: "TestAgent",
+      taskId: "task-legend",
+    });
     const viewState = makeViewState({
       mode: "monitor-detail",
       monitorSelectedIndex: 0,
@@ -240,9 +297,10 @@ describe("renderLegend in monitor-detail mode", () => {
 
     const result = renderLegend(theme, "/tmp", 200, viewState, null, false, registry);
 
-    expect(result).toContain("p:Pause");
+    expect(result).not.toContain("p:Pause");
+    expect(result).not.toContain("p:Resume");
     expect(result).toContain("e:End");
-    expect(result).toContain("i:Inspect");
+    expect(result).toContain("i:Snapshot");
     expect(result).toContain("Esc:Back");
 
     registry.dispose();

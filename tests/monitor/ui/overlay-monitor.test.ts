@@ -1,6 +1,3 @@
-// task-10: overlay monitor view render tests
-
-// ─── Mocks for overlay-render.ts dependencies ────────────────────────────────
 import { describe, it, expect, vi } from "vitest";
 
 vi.mock("@mariozechner/pi-tui", () => ({
@@ -9,93 +6,10 @@ vi.mock("@mariozechner/pi-tui", () => ({
   matchesKey: (_data: string, _key: string) => false,
 }));
 
-vi.mock("../../../lib.js", () => ({
-  formatDuration: (ms: number) => `${ms}ms`,
-  formatRelativeTime: (_t: string) => "just now",
-  buildSelfRegistration: () => ({}),
-  coloredAgentName: (name: string) => name,
-  computeStatus: () => "idle",
-  STATUS_INDICATORS: {},
-  agentHasTask: () => false,
-  estimateCost: () => 0,
-  formatCost: () => "",
-  renderProgressBar: () => "[]",
-  getSpinnerFrame: () => "⠋",
-  getToolIcon: () => "🔧",
-  renderSparkline: () => "",
-  renderFileTree: () => [],
-  renderAgentPipeline: () => "",
-  renderDiffStatsBar: () => "",
-  extractFolder: (s: string) => s,
-}));
-
-vi.mock("../../../store.js", () => ({
-  getActiveAgents: () => [],
-  getClaims: () => ({}),
-  getRegisteredAgents: () => [],
-}));
-
-vi.mock("../../../crew/store.js", () => ({
-  getTasks: () => [],
-  getTask: () => undefined,
-  getPlan: () => null,
-  getPlanLabel: () => "",
-  getCrewDir: (cwd: string) => cwd,
-  hasPlan: () => false,
-  getReadyTasks: () => [],
-}));
-
-vi.mock("../../../crew/state.js", () => ({
-  autonomousState: { concurrency: 1, waveNumber: 0, startedAt: null },
-  getPlanningUpdateAgeMs: () => 0,
-  isAutonomousForCwd: () => false,
-  isPlanningForCwd: () => false,
-  isPlanningStalled: () => false,
-  planningState: { pass: 0, maxPasses: 5, phase: "idle", updatedAt: null },
-  PLANNING_STALE_TIMEOUT_MS: 60000,
-}));
-
-vi.mock("../../../crew/live-progress.js", () => ({
-  getLiveWorkers: () => new Map(),
-  hasLiveWorkers: () => false,
-}));
-
-vi.mock("../../../feed.js", () => ({
-  formatFeedLine: () => "",
-}));
-
-vi.mock("../../../crew/utils/discover.js", () => ({
-  discoverCrewAgents: () => [],
-}));
-
-vi.mock("../../../config.js", () => ({
-  loadConfig: () => ({ stuckThreshold: 300 }),
-}));
-
-vi.mock("../../../crew/utils/config.js", () => ({
-  loadCrewConfig: () => ({
-    coordination: "light",
-    dependencies: "strict",
-    concurrency: { max: 4 },
-  }),
-}));
-
-vi.mock("../../../crew/utils/checkpoint.js", () => ({
-  listCheckpoints: () => [],
-  getCheckpointDiff: () => null,
-}));
-
-vi.mock("../../../crew/lobby.js", () => ({
-  getLobbyWorkerCount: () => 0,
-}));
-
-// ─── Actual test imports ──────────────────────────────────────────────────────
-
 import { renderAttentionQueue, renderMonitorView, renderMonitorDetailView } from "../../../overlay-render.js";
 import type { CrewViewState } from "../../../overlay-actions.js";
 import { MonitorRegistry } from "../../../src/monitor/registry.js";
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+import { stripAnsi } from "../../../src/monitor/ui/render.js";
 
 function makeViewState(overrides?: Partial<CrewViewState>): CrewViewState {
   return {
@@ -127,189 +41,231 @@ function makeRegistry(): MonitorRegistry {
   return new MonitorRegistry({ healthConfig: {} });
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+function startSession(registry: MonitorRegistry, id: string, name: string, overrides: Record<string, unknown> = {}): string {
+  return registry.lifecycle.start({
+    id,
+    name,
+    cwd: "/tmp/project",
+    model: "claude-3",
+    startedAt: new Date().toISOString(),
+    agent: name,
+    ...(overrides as any),
+  });
+}
 
 describe("renderMonitorView", () => {
-  it("returns lines when registry is undefined", () => {
+  it("returns a padded fallback when no registry is available", () => {
     const viewState = makeViewState();
     const lines = renderMonitorView(undefined, 80, 10, viewState);
+
     expect(lines).toHaveLength(10);
-    expect(lines.join("\n")).toContain("No monitor registry");
+    expect(lines[0]).toBe("  No monitor registry available.");
+    expect(lines.slice(1)).toEqual(new Array(9).fill(""));
   });
 
-  it("returns lines with empty sessions when registry has no sessions", () => {
+  it("returns a padded empty-state when the registry has no sessions", () => {
     const registry = makeRegistry();
-    const viewState = makeViewState();
-    const lines = renderMonitorView(registry, 80, 10, viewState);
-    expect(lines).toHaveLength(10);
-    expect(lines.join("\n")).toContain("No active sessions");
-  });
+    const lines = renderMonitorView(registry, 80, 10, makeViewState());
 
-  it("renders session data when registry has sessions", () => {
-    const registry = makeRegistry();
-    registry.lifecycle.start({
-      id: "sess-test-1",
-      name: "Test Session",
-      cwd: "/tmp",
-      model: "claude-3",
-      startedAt: new Date().toISOString(),
-      agent: "TestAgent",
-    });
-    const viewState = makeViewState();
-    const lines = renderMonitorView(registry, 80, 20, viewState);
-    expect(lines.length).toBeGreaterThan(0);
-    // Should contain session info
-    const combined = lines.join("\n");
-    expect(combined).toBeTruthy();
+    expect(lines).toHaveLength(10);
+    expect(lines[0]).toBe("  No active sessions.");
+    expect(lines[1]).toBe("");
     registry.dispose();
   });
 
-  it("clamps monitorSelectedIndex to valid range", () => {
+  it("renders grouped session sections and the selected running session", () => {
     const registry = makeRegistry();
-    registry.lifecycle.start({
-      id: "sess-clamp",
-      name: "Clamp Session",
-      cwd: "/tmp",
-      model: "claude-3",
-      startedAt: new Date().toISOString(),
-      agent: "TestAgent",
+    startSession(registry, "sess-running", "Running Session");
+    const queuedId = startSession(registry, "sess-queued", "Queued Session");
+    registry.lifecycle.pause(queuedId, "awaiting operator input");
+    registry.store.update(queuedId, {
+      events: [
+        { type: "session.pause", timestamp: new Date().toISOString(), data: { reason: "awaiting operator input" } },
+      ],
     });
+    const completedId = startSession(registry, "sess-ended", "Completed Session");
+    registry.lifecycle.end(completedId, "all done");
+    const failedId = startSession(registry, "sess-failed", "Failed Session");
+    registry.lifecycle.escalate(failedId, "worker crashed");
+    registry.store.update(failedId, {
+      events: [
+        { type: "session.error", timestamp: new Date().toISOString(), data: { message: "worker crashed" } },
+      ],
+    });
+
+    const lines = renderMonitorView(registry, 120, 20, makeViewState({ monitorSelectedIndex: 0 }));
+    const visible = lines.map((line) => stripAnsi(line));
+
+    expect(visible).toContain("⚠ Attention (2)");
+    expect(visible).toContain("Running (1)");
+    expect(visible).toContain("Queued (1)");
+    expect(visible).toContain("Completed (1)");
+    expect(visible).toContain("Failed (1)");
+    expect(visible.some((line) => line.includes(">") && line.includes("Running Session"))).toBe(true);
+    expect(visible.some((line) => line.includes("sess-queued") && line.includes("awaiting operator input"))).toBe(true);
+    expect(visible.some((line) => line.includes("Reason: worker crashed"))).toBe(true);
+
+    registry.dispose();
+  });
+
+  it("clamps monitorSelectedIndex to the available session range", () => {
+    const registry = makeRegistry();
+    startSession(registry, "sess-only", "Only Session");
     const viewState = makeViewState({ monitorSelectedIndex: 999 });
+
     renderMonitorView(registry, 80, 10, viewState);
-    // Should be clamped to 0 (only 1 session)
+
     expect(viewState.monitorSelectedIndex).toBe(0);
     registry.dispose();
   });
 
-  it("pads output to the requested height", () => {
+  it("pads monitor output to the requested height", () => {
     const registry = makeRegistry();
-    registry.lifecycle.start({
-      id: "sess-height",
-      name: "Session Height",
-      cwd: "/tmp",
-      model: "claude-3",
-      startedAt: new Date().toISOString(),
-      agent: "TestAgent",
-    });
+    startSession(registry, "sess-height", "Height Session");
 
-    const viewState = makeViewState();
-    const lines = renderMonitorView(registry, 80, 15, viewState);
+    const lines = renderMonitorView(registry, 80, 15, makeViewState());
 
     expect(lines).toHaveLength(15);
+    expect(stripAnsi(lines[0])).toContain("Running (1)");
+    expect(stripAnsi(lines[1])).toContain("Height Session");
+    expect(lines.at(-1)).toBe("");
     registry.dispose();
   });
 
-  it("renders attention section at top when a session is paused", () => {
+  it("renders an attention queue for paused and error sessions but not healthy active sessions", () => {
     const registry = makeRegistry();
-    registry.lifecycle.start({
-      id: "sess-paused-attn",
-      name: "Paused Session",
-      cwd: "/tmp",
-      model: "claude-3",
-      startedAt: new Date().toISOString(),
-      agent: "TestAgent",
+    const pausedId = startSession(registry, "sess-paused", "Paused Session");
+    registry.lifecycle.pause(pausedId, "waiting for approval");
+    registry.store.update(pausedId, {
+      events: [
+        { type: "session.pause", timestamp: new Date().toISOString(), data: { reason: "waiting for approval" } },
+      ],
     });
-    registry.lifecycle.pause("sess-paused-attn");
-    const viewState = makeViewState();
-    const lines = renderMonitorView(registry, 80, 20, viewState);
-    const text = lines.join("\n");
-    expect(text).toContain("Attention");
-    registry.dispose();
-  });
+    const failedId = startSession(registry, "sess-error", "Error Session");
+    registry.lifecycle.escalate(failedId, "tool failed repeatedly");
+    registry.store.update(failedId, {
+      events: [
+        { type: "session.error", timestamp: new Date().toISOString(), data: { message: "tool failed repeatedly" } },
+      ],
+    });
+    startSession(registry, "sess-healthy", "Healthy Session");
 
-  it("renders attention section for sessions in error state", () => {
-    const registry = makeRegistry();
-    registry.lifecycle.start({
-      id: "sess-err-attn",
-      name: "Error Session",
-      cwd: "/tmp",
-      model: "claude-3",
-      startedAt: new Date().toISOString(),
-      agent: "ErrAgent",
-    });
-    registry.lifecycle.escalate("sess-err-attn", "something went wrong");
-    const viewState = makeViewState();
-    const lines = renderMonitorView(registry, 80, 20, viewState);
-    const text = lines.join("\n");
-    expect(text).toContain("Attention");
-    registry.dispose();
-  });
+    const lines = renderMonitorView(registry, 120, 20, makeViewState());
+    const visible = lines.map((line) => stripAnsi(line));
 
-  it("does not render attention section for freshly started active sessions", () => {
-    const registry = makeRegistry();
-    registry.lifecycle.start({
-      id: "sess-healthy-attn",
-      name: "Healthy Session",
-      cwd: "/tmp",
-      model: "claude-3",
-      startedAt: new Date().toISOString(),
-      agent: "OkAgent",
-    });
-    const viewState = makeViewState();
-    const lines = renderMonitorView(registry, 80, 20, viewState);
-    const text = lines.join("\n");
-    expect(text).not.toContain("⚠ Attention");
+    expect(visible[0]).toBe("⚠ Attention (2)");
+    expect(visible.some((line) => line.includes("sess-paused") && line.includes("waiting for approval"))).toBe(true);
+    expect(visible.some((line) => line.includes("sess-error") && line.includes("Session failed with a recoverable error."))).toBe(true);
+    expect(visible.some((line) => line.includes("Resume after operator input."))).toBe(true);
+    expect(visible.some((line) => line.includes("Review logs and retry after applying a fix."))).toBe(true);
+    expect(visible.some((line) => line.includes("sess-healthy") && line.includes("healthy"))).toBe(false);
+
     registry.dispose();
   });
 });
 
 describe("renderAttentionQueue", () => {
-  it("returns empty array when no attention items", () => {
-    const lines = renderAttentionQueue([], 80);
-    expect(lines).toHaveLength(0);
+  it("returns an empty array when there are no attention items", () => {
+    expect(renderAttentionQueue([], 80)).toEqual([]);
   });
 
-  it("renders attention header and items when items exist", () => {
+  it("renders a concrete header, reason label, message, and recommendation", () => {
     const items = [
       {
         id: "att-1",
-        sessionId: "sess-test-12",
+        sessionId: "sess-test-1234567890",
         reason: "stuck" as const,
         message: "No progress detected",
         recommendedAction: "Inspect and retry",
-        timestamp: new Date().toISOString(),
+        timestamp: new Date("2026-03-08T12:34:56.000Z").toISOString(),
       },
     ];
-    const lines = renderAttentionQueue(items, 80);
-    const text = lines.join("\n");
-    expect(text).toContain("Attention");
-    expect(text).toContain("sess-test-12");
-    expect(text).toContain("stuck");
-    expect(text).toContain("No progress detected");
-    expect(text).toContain("Inspect and retry");
+
+    const lines = renderAttentionQueue(items, 80).map((line) => stripAnsi(line));
+
+    expect(lines).toEqual([
+      "⚠ Attention (1)",
+      "  sess-test-12  stuck: No progress detected",
+      "  → Inspect and retry",
+      "",
+    ]);
   });
 });
 
 describe("renderMonitorDetailView", () => {
-  it("returns lines when registry is undefined", () => {
-    const viewState = makeViewState({ mode: "monitor-detail" });
-    const lines = renderMonitorDetailView(undefined, 80, 10, viewState);
+  it("returns a padded fallback when no registry is available", () => {
+    const lines = renderMonitorDetailView(undefined, 80, 10, makeViewState({ mode: "monitor-detail" }));
+
     expect(lines).toHaveLength(10);
-    expect(lines.join("\n")).toContain("No monitor registry");
+    expect(lines[0]).toBe("  No monitor registry available.");
   });
 
-  it("returns fallback when session not found", () => {
+  it("returns a padded fallback when the selected session does not exist", () => {
     const registry = makeRegistry();
-    const viewState = makeViewState({ mode: "monitor-detail", monitorSelectedIndex: 5 });
-    const lines = renderMonitorDetailView(registry, 80, 10, viewState);
+    const lines = renderMonitorDetailView(registry, 80, 10, makeViewState({ mode: "monitor-detail", monitorSelectedIndex: 5 }));
+
     expect(lines).toHaveLength(10);
-    expect(lines.join("\n")).toContain("Session not found");
+    expect(lines[0]).toBe("  Session not found.");
     registry.dispose();
   });
 
-  it("renders detail view for a real session", () => {
+  it("renders the detail header, health summary, and recent event history for the selected session", () => {
     const registry = makeRegistry();
-    registry.lifecycle.start({
-      id: "sess-detail",
-      name: "Detail Session",
-      cwd: "/tmp",
-      model: "claude-3",
-      startedAt: new Date().toISOString(),
-      agent: "DetailAgent",
+    const sessionId = startSession(registry, "sess-detail", "Detail Session");
+    registry.store.update(sessionId, {
+      events: [
+        {
+          type: "session.start",
+          timestamp: new Date("2026-03-08T12:00:00.000Z").toISOString(),
+          data: { agentName: "Detail Session" },
+        },
+        {
+          type: "tool.call",
+          timestamp: new Date("2026-03-08T12:01:00.000Z").toISOString(),
+          data: { type: "tool.call", toolName: "bash" },
+        },
+        {
+          type: "session.error",
+          timestamp: new Date("2026-03-08T12:02:00.000Z").toISOString(),
+          data: { type: "session.error", message: "needs operator review", fatal: false },
+        },
+      ],
     });
-    const viewState = makeViewState({ mode: "monitor-detail", monitorSelectedIndex: 0 });
-    const lines = renderMonitorDetailView(registry, 80, 20, viewState);
-    expect(lines.length).toBeGreaterThan(0);
+
+    registry.healthMonitor["signalHistory"].set(sessionId, {
+      lastHeartbeatAt: Date.now() - 40_000,
+      lastOutputAt: Date.now() - 40_000,
+      lastToolActivityAt: Date.now() - 40_000,
+      waiting: false,
+      waitingReason: undefined,
+      waitingAt: undefined,
+      retryCount: 0,
+    });
+    registry.healthMonitor["trackedSessionState"].set(sessionId, {
+      state: "degraded",
+      repeatCount: 1,
+      historyCount: 3,
+    });
+    registry.healthMonitor.checkHealth(sessionId);
+
+    const lines = renderMonitorDetailView(
+      registry,
+      120,
+      20,
+      makeViewState({ mode: "monitor-detail", monitorSelectedIndex: 0 }),
+    ).map((line) => stripAnsi(line));
+
+    expect(lines[0]).toContain("── Session Detail");
+    expect(lines[1]).toContain("Agent: Detail Session");
+    expect(lines[1]).toContain("Status: active");
+    expect(lines[1]).toContain("Health: degraded");
+    expect(lines).toContain("Health summary: Session has been stale for 40s with no recent output.");
+    expect(lines).toContain("repeat 2 · history 3");
+    expect(lines).toContain("Action: Check whether the worker is blocked on a slow tool or loop.");
+    expect(lines.some((line) => line.includes("🚀 START"))).toBe(true);
+    expect(lines.some((line) => line.includes("🛠 TOOL") && line.includes("Running bash"))).toBe(true);
+    expect(lines.some((line) => line.includes("❗ ERROR") && line.includes("needs operator review"))).toBe(true);
+
     registry.dispose();
   });
 });

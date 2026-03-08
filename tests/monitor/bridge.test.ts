@@ -5,35 +5,7 @@
  * live-worker events to monitor session lifecycle calls and event emissions.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { Mock } from "vitest";
-
-// ─── Mock crew/live-progress module ──────────────────────────────────────────
-// We intercept the module to control live-worker state in tests.
-
-let mockListeners = new Set<() => void>();
-let mockWorkers = new Map<string, import("../../crew/live-progress.js").LiveWorkerInfo>();
-
-vi.mock("../../crew/live-progress.js", () => ({
-  getLiveWorkers: vi.fn((cwd?: string) => {
-    if (!cwd) return new Map(mockWorkers);
-    const filtered = new Map<string, import("../../crew/live-progress.js").LiveWorkerInfo>();
-    for (const [key, info] of mockWorkers) {
-      if (info.cwd === cwd) {
-        // filtered map keyed by taskId (matching the real implementation)
-        filtered.set(info.taskId, info);
-      }
-    }
-    return filtered;
-  }),
-  onLiveWorkersChanged: vi.fn((fn: () => void) => {
-    mockListeners.add(fn);
-    return () => mockListeners.delete(fn);
-  }),
-}));
-
-// ─── Import after mock setup ──────────────────────────────────────────────────
-
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { CrewMonitorBridge, createCrewMonitorBridge } from "../../src/monitor/bridge.js";
 import { SessionLifecycleManager } from "../../src/monitor/lifecycle/manager.js";
 import { SessionEventEmitter } from "../../src/monitor/events/emitter.js";
@@ -41,14 +13,14 @@ import { SessionStore } from "../../src/monitor/store/session-store.js";
 import { createMonitorRegistry } from "../../src/monitor/index.js";
 import type { SessionEvent } from "../../src/monitor/events/types.js";
 import type { LiveWorkerInfo } from "../../crew/live-progress.js";
-import { getLiveWorkers, onLiveWorkersChanged } from "../../crew/live-progress.js";
+import {
+  getLiveWorkers,
+  onLiveWorkersChanged,
+  removeLiveWorker,
+  updateLiveWorker,
+} from "../../crew/live-progress.js";
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function makeWorker(
-  taskId: string,
-  overrides: Partial<LiveWorkerInfo> = {},
-): LiveWorkerInfo {
+function makeWorker(taskId: string, overrides: Partial<LiveWorkerInfo> = {}): LiveWorkerInfo {
   return {
     cwd: "/tmp/test",
     taskId,
@@ -65,336 +37,285 @@ function makeWorker(
       durationMs: 0,
       filesModified: [],
       toolCallBuckets: [],
+      ...overrides.progress,
     },
     ...overrides,
   };
 }
 
-function workerKey(cwd: string, taskId: string): string {
-  return `${cwd}::${taskId}`;
+function addWorker(worker: LiveWorkerInfo): void {
+  updateLiveWorker(worker.cwd, worker.taskId, {
+    taskId: worker.taskId,
+    agent: worker.agent,
+    name: worker.name,
+    startedAt: worker.startedAt,
+    progress: worker.progress,
+  });
 }
-
-/** Trigger all registered listeners (simulates updateLiveWorker / removeLiveWorker) */
-function notifyListeners(): void {
-  for (const fn of mockListeners) fn();
-}
-
-// ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe("CrewMonitorBridge", () => {
   let lifecycle: SessionLifecycleManager;
   let emitter: SessionEventEmitter;
   let store: SessionStore;
   let emittedEvents: SessionEvent[];
+  let createdWorkers: Array<{ cwd: string; taskId: string }>;
+  let activeBridges: CrewMonitorBridge[];
 
   beforeEach(() => {
-    mockWorkers.clear();
-    mockListeners.clear();
-    vi.clearAllMocks();
-
     store = new SessionStore();
     emitter = new SessionEventEmitter();
     lifecycle = new SessionLifecycleManager(store, emitter);
     emittedEvents = [];
-    emitter.subscribe((e) => emittedEvents.push(e));
+    createdWorkers = [];
+    activeBridges = [];
+    emitter.subscribe((event) => emittedEvents.push(event));
   });
 
   afterEach(() => {
-    mockWorkers.clear();
-    mockListeners.clear();
+    for (const bridge of activeBridges) {
+      bridge.dispose();
+    }
+    for (const worker of createdWorkers) {
+      removeLiveWorker(worker.cwd, worker.taskId);
+    }
   });
 
-  // ─── Construction ────────────────────────────────────────────────────────
+  function trackBridge(bridge: CrewMonitorBridge): CrewMonitorBridge {
+    activeBridges.push(bridge);
+    return bridge;
+  }
 
-  it("subscribes to onLiveWorkersChanged on construction", () => {
-    const bridge = new CrewMonitorBridge(lifecycle, emitter);
-    expect(onLiveWorkersChanged).toHaveBeenCalledTimes(1);
-    bridge.dispose();
-  });
+  function trackWorker(worker: LiveWorkerInfo): LiveWorkerInfo {
+    createdWorkers.push({ cwd: worker.cwd, taskId: worker.taskId });
+    return worker;
+  }
 
-  it("performs initial sync on construction — picks up pre-existing workers", () => {
-    const worker = makeWorker("task-1");
-    mockWorkers.set(workerKey(worker.cwd, worker.taskId), worker);
-
-    const bridge = new CrewMonitorBridge(lifecycle, emitter);
-
-    expect(bridge.sessionCount).toBe(1);
-    const sessionId = bridge.getSessionId("task-1");
-    expect(sessionId).toBeDefined();
-    expect(store.get(sessionId!)?.status).toBe("active");
-
-    bridge.dispose();
-  });
-
-  // ─── Worker Added ─────────────────────────────────────────────────────────
-
-  it("creates a monitor session when a worker is added", () => {
-    const bridge = new CrewMonitorBridge(lifecycle, emitter);
+  it("subscribes to live updates and creates a session when a worker arrives after construction", () => {
+    const bridge = trackBridge(new CrewMonitorBridge(lifecycle, emitter));
     expect(bridge.sessionCount).toBe(0);
 
-    const worker = makeWorker("task-2");
-    mockWorkers.set(workerKey(worker.cwd, worker.taskId), worker);
-    notifyListeners();
+    const worker = trackWorker(makeWorker("task-late-join", { name: "Late Join Worker" }));
+    addWorker(worker);
 
-    expect(bridge.sessionCount).toBe(1);
-    const sessionId = bridge.getSessionId("task-2");
+    const sessionId = bridge.getSessionId(worker.taskId, worker.cwd);
     expect(sessionId).toBeDefined();
-    expect(store.get(sessionId!)?.status).toBe("active");
+    expect(store.get(sessionId!)).toMatchObject({
+      status: "active",
+      metadata: {
+        id: sessionId,
+        name: "Late Join Worker",
+        taskId: "task-late-join",
+        cwd: "/tmp/test",
+        agent: "TestAgent",
+      },
+    });
 
-    bridge.dispose();
-  });
-
-  it("emits session.start event when a worker is added", () => {
-    const bridge = new CrewMonitorBridge(lifecycle, emitter);
-    emittedEvents = [];
-
-    const worker = makeWorker("task-start");
-    mockWorkers.set(workerKey(worker.cwd, worker.taskId), worker);
-    notifyListeners();
-
-    const startEvents = emittedEvents.filter((e) => e.type === "session.start");
+    const startEvents = emittedEvents.filter((event) => event.type === "session.start");
     expect(startEvents).toHaveLength(1);
-
-    bridge.dispose();
+    expect(startEvents[0]).toMatchObject({
+      sessionId,
+      payload: {
+        type: "session.start",
+        agentName: "TestAgent",
+        workingDir: "/tmp/test",
+      },
+    });
   });
 
-  it("handles multiple workers being added", () => {
-    const bridge = new CrewMonitorBridge(lifecycle, emitter);
+  it("performs initial sync on construction and picks up pre-existing workers", () => {
+    const worker = trackWorker(makeWorker("task-existing", { name: "Existing Worker" }));
+    addWorker(worker);
 
-    const w1 = makeWorker("task-a");
-    const w2 = makeWorker("task-b");
-    mockWorkers.set(workerKey(w1.cwd, w1.taskId), w1);
-    mockWorkers.set(workerKey(w2.cwd, w2.taskId), w2);
-    notifyListeners();
+    const bridge = trackBridge(new CrewMonitorBridge(lifecycle, emitter));
 
-    expect(bridge.sessionCount).toBe(2);
-
-    bridge.dispose();
-  });
-
-  // ─── Worker Removed ───────────────────────────────────────────────────────
-
-  it("ends monitor session when worker is removed", () => {
-    const bridge = new CrewMonitorBridge(lifecycle, emitter);
-
-    const worker = makeWorker("task-remove");
-    mockWorkers.set(workerKey(worker.cwd, worker.taskId), worker);
-    notifyListeners();
-
-    const sessionId = bridge.getSessionId("task-remove")!;
-    expect(store.get(sessionId)?.status).toBe("active");
-
-    // Remove worker
-    mockWorkers.delete(workerKey(worker.cwd, worker.taskId));
-    notifyListeners();
-
-    expect(store.get(sessionId)?.status).toBe("ended");
-    expect(bridge.sessionCount).toBe(0);
-
-    bridge.dispose();
-  });
-
-  it("emits session.end event when worker is removed", () => {
-    const bridge = new CrewMonitorBridge(lifecycle, emitter);
-
-    const worker = makeWorker("task-end-event");
-    mockWorkers.set(workerKey(worker.cwd, worker.taskId), worker);
-    notifyListeners();
-    emittedEvents = []; // reset
-
-    mockWorkers.delete(workerKey(worker.cwd, worker.taskId));
-    notifyListeners();
-
-    const endEvents = emittedEvents.filter((e) => e.type === "session.end");
-    expect(endEvents).toHaveLength(1);
-
-    bridge.dispose();
-  });
-
-  it("does not double-end a session if called twice for same worker removal", () => {
-    const bridge = new CrewMonitorBridge(lifecycle, emitter);
-
-    const worker = makeWorker("task-double-end");
-    mockWorkers.set(workerKey(worker.cwd, worker.taskId), worker);
-    notifyListeners();
-
-    mockWorkers.delete(workerKey(worker.cwd, worker.taskId));
-    notifyListeners();
-    notifyListeners(); // second fire with same state — should be no-op
-
-    const endEvents = emittedEvents.filter((e) => e.type === "session.end");
-    expect(endEvents).toHaveLength(1);
-
-    bridge.dispose();
-  });
-
-  // ─── Tool Change ──────────────────────────────────────────────────────────
-
-  it("emits tool.call event when a worker's currentTool changes", () => {
-    const bridge = new CrewMonitorBridge(lifecycle, emitter);
-
-    const worker = makeWorker("task-tool");
-    mockWorkers.set(workerKey(worker.cwd, worker.taskId), worker);
-    notifyListeners();
-    emittedEvents = []; // reset after session.start
-
-    // Simulate tool execution starting
-    worker.progress.currentTool = "bash";
-    notifyListeners();
-
-    const toolCallEvents = emittedEvents.filter((e) => e.type === "tool.call");
-    expect(toolCallEvents).toHaveLength(1);
-    expect((toolCallEvents[0].payload as { toolName: string }).toolName).toBe("bash");
-
-    bridge.dispose();
-  });
-
-  it("emits multiple tool.call events for successive tool changes", () => {
-    const bridge = new CrewMonitorBridge(lifecycle, emitter);
-
-    const worker = makeWorker("task-multi-tool");
-    mockWorkers.set(workerKey(worker.cwd, worker.taskId), worker);
-    notifyListeners();
-    emittedEvents = [];
-
-    worker.progress.currentTool = "read";
-    notifyListeners();
-
-    worker.progress.currentTool = undefined;
-    notifyListeners();
-
-    worker.progress.currentTool = "write";
-    notifyListeners();
-
-    worker.progress.currentTool = "bash";
-    notifyListeners();
-
-    const toolCallEvents = emittedEvents.filter((e) => e.type === "tool.call");
-    expect(toolCallEvents).toHaveLength(3); // read, write, bash
-    const toolNames = toolCallEvents.map((e) => (e.payload as { toolName: string }).toolName);
-    expect(toolNames).toEqual(["read", "write", "bash"]);
-
-    bridge.dispose();
-  });
-
-  it("does NOT emit tool.call if currentTool remains the same", () => {
-    const bridge = new CrewMonitorBridge(lifecycle, emitter);
-
-    const worker = makeWorker("task-same-tool");
-    worker.progress.currentTool = "bash";
-    mockWorkers.set(workerKey(worker.cwd, worker.taskId), worker);
-    notifyListeners();
-    emittedEvents = [];
-
-    // Fire again with same tool — no new tool.call
-    notifyListeners();
-    notifyListeners();
-
-    const toolCallEvents = emittedEvents.filter((e) => e.type === "tool.call");
-    expect(toolCallEvents).toHaveLength(0);
-
-    bridge.dispose();
-  });
-
-  it("emits tool.call immediately for a worker that already has an active tool on discovery", () => {
-    const worker = makeWorker("task-pre-tool");
-    worker.progress.currentTool = "grep";
-    mockWorkers.set(workerKey(worker.cwd, worker.taskId), worker);
-
-    emittedEvents = [];
-    const bridge = new CrewMonitorBridge(lifecycle, emitter);
-
-    const toolCallEvents = emittedEvents.filter((e) => e.type === "tool.call");
-    expect(toolCallEvents).toHaveLength(1);
-    expect((toolCallEvents[0].payload as { toolName: string }).toolName).toBe("grep");
-
-    bridge.dispose();
-  });
-
-  // ─── taskId → sessionId mapping ──────────────────────────────────────────
-
-  it("getSessionId returns undefined for unknown taskId", () => {
-    const bridge = new CrewMonitorBridge(lifecycle, emitter);
-    expect(bridge.getSessionId("nonexistent")).toBeUndefined();
-    bridge.dispose();
-  });
-
-  it("getSessionId resolves by cwd+taskId when cwd is provided", () => {
-    const bridge = new CrewMonitorBridge(lifecycle, emitter);
-
-    const worker = makeWorker("task-lookup");
-    mockWorkers.set(workerKey(worker.cwd, worker.taskId), worker);
-    notifyListeners();
-
-    const sessionId = bridge.getSessionId("task-lookup", worker.cwd);
+    const sessionId = bridge.getSessionId("task-existing", "/tmp/test");
+    expect(bridge.sessionCount).toBe(1);
     expect(sessionId).toBeDefined();
-
-    bridge.dispose();
+    expect(store.get(sessionId!)).toMatchObject({
+      status: "active",
+      metadata: {
+        name: "Existing Worker",
+        taskId: "task-existing",
+      },
+    });
   });
 
-  // ─── dispose() ────────────────────────────────────────────────────────────
+  it("ends the mapped monitor session and emits a single session.end event when the worker disappears", () => {
+    const bridge = trackBridge(new CrewMonitorBridge(lifecycle, emitter));
+    const worker = trackWorker(makeWorker("task-remove", { name: "Remove Worker" }));
+    addWorker(worker);
 
-  it("dispose() prevents further syncs after being called", () => {
-    const bridge = new CrewMonitorBridge(lifecycle, emitter);
+    emittedEvents = [];
+    const sessionId = bridge.getSessionId("task-remove", worker.cwd)!;
+    removeLiveWorker(worker.cwd, worker.taskId);
 
-    bridge.dispose();
-
-    // Adding workers after disposal should have no effect
-    const worker = makeWorker("task-after-dispose");
-    mockWorkers.set(workerKey(worker.cwd, worker.taskId), worker);
-    notifyListeners();
-
+    expect(store.get(sessionId)).toMatchObject({
+      status: "ended",
+      metadata: { name: "Remove Worker" },
+    });
     expect(bridge.sessionCount).toBe(0);
+
+    const endEvents = emittedEvents.filter((event) => event.type === "session.end");
+    expect(endEvents).toHaveLength(1);
+    expect(endEvents[0]).toMatchObject({
+      sessionId,
+      payload: { type: "session.end", summary: undefined },
+    });
   });
 
-  it("dispose() removes listener from onLiveWorkersChanged", () => {
-    const bridge = new CrewMonitorBridge(lifecycle, emitter);
-    expect(mockListeners.size).toBe(1);
+  it("does not emit duplicate session.end events when removal notifications repeat", () => {
+    const bridge = trackBridge(new CrewMonitorBridge(lifecycle, emitter));
+    const worker = trackWorker(makeWorker("task-double-end"));
+    addWorker(worker);
 
+    const sessionId = bridge.getSessionId(worker.taskId, worker.cwd)!;
+    removeLiveWorker(worker.cwd, worker.taskId);
+    removeLiveWorker(worker.cwd, worker.taskId);
+
+    const endEvents = emittedEvents.filter((event) => event.type === "session.end");
+    expect(endEvents).toHaveLength(1);
+    expect(store.get(sessionId)?.status).toBe("ended");
+  });
+
+  it("emits tool.call events only when the current tool changes", () => {
+    const bridge = trackBridge(new CrewMonitorBridge(lifecycle, emitter));
+    const worker = trackWorker(makeWorker("task-tools"));
+    addWorker(worker);
+
+    emittedEvents = [];
+
+    addWorker(makeWorker("task-tools", { progress: { ...worker.progress, currentTool: "read" } }));
+    addWorker(makeWorker("task-tools", { progress: { ...worker.progress, currentTool: "read" } }));
+    addWorker(makeWorker("task-tools", { progress: { ...worker.progress, currentTool: undefined } }));
+    addWorker(makeWorker("task-tools", { progress: { ...worker.progress, currentTool: "write" } }));
+    addWorker(makeWorker("task-tools", { progress: { ...worker.progress, currentTool: "bash" } }));
+
+    const toolCallEvents = emittedEvents.filter((event) => event.type === "tool.call");
+    expect(toolCallEvents.map((event) => event.payload)).toEqual([
+      { type: "tool.call", toolName: "read" },
+      { type: "tool.call", toolName: "write" },
+      { type: "tool.call", toolName: "bash" },
+    ]);
+  });
+
+  it("emits a tool.call immediately when a discovered worker is already running a tool", () => {
+    const worker = trackWorker(
+      makeWorker("task-pre-tool", {
+        progress: {
+          agent: "TestAgent",
+          status: "running",
+          currentTool: "grep",
+          recentTools: [],
+          toolCallCount: 1,
+          tokens: 0,
+          durationMs: 0,
+          filesModified: [],
+          toolCallBuckets: [],
+        },
+      }),
+    );
+    addWorker(worker);
+
+    emittedEvents = [];
+    const bridge = trackBridge(new CrewMonitorBridge(lifecycle, emitter));
+
+    const toolCallEvents = emittedEvents.filter((event) => event.type === "tool.call");
+    expect(toolCallEvents).toHaveLength(1);
+    expect(toolCallEvents[0]).toMatchObject({
+      sessionId: bridge.getSessionId("task-pre-tool", worker.cwd),
+      payload: { type: "tool.call", toolName: "grep" },
+    });
+  });
+
+  it("returns undefined for an unknown task and resolves duplicate task ids by cwd", () => {
+    const bridge = trackBridge(new CrewMonitorBridge(lifecycle, emitter));
+    const workerA = trackWorker(makeWorker("task-shared", { cwd: "/tmp/project-a", name: "Worker A" }));
+    const workerB = trackWorker(makeWorker("task-shared", { cwd: "/tmp/project-b", name: "Worker B" }));
+    addWorker(workerA);
+    addWorker(workerB);
+
+    expect(bridge.getSessionId("missing-task")).toBeUndefined();
+
+    const sessionA = bridge.getSessionId("task-shared", "/tmp/project-a");
+    const sessionB = bridge.getSessionId("task-shared", "/tmp/project-b");
+    expect(sessionA).toBeDefined();
+    expect(sessionB).toBeDefined();
+    expect(sessionA).not.toBe(sessionB);
+    expect(store.get(sessionA!)?.metadata.name).toBe("Worker A");
+    expect(store.get(sessionB!)?.metadata.name).toBe("Worker B");
+  });
+
+  it("starts a fresh monitor session when the same live worker task is restarted", () => {
+    const bridge = trackBridge(new CrewMonitorBridge(lifecycle, emitter));
+    const worker = trackWorker(makeWorker("task-restart", { name: "Restart Worker" }));
+    addWorker(worker);
+
+    const firstSessionId = bridge.getSessionId(worker.taskId, worker.cwd)!;
+    removeLiveWorker(worker.cwd, worker.taskId);
+
+    const restartedWorker = makeWorker("task-restart", { name: "Restart Worker", startedAt: worker.startedAt + 5_000 });
+    addWorker(restartedWorker);
+
+    const secondSessionId = bridge.getSessionId(worker.taskId, worker.cwd)!;
+    expect(secondSessionId).not.toBe(firstSessionId);
+    expect(store.get(firstSessionId)).toMatchObject({
+      status: "ended",
+      metadata: { taskId: "task-restart" },
+    });
+    expect(store.get(secondSessionId)).toMatchObject({
+      status: "active",
+      metadata: { taskId: "task-restart" },
+    });
+  });
+
+  it("dispose prevents future syncs without mutating already-created sessions", () => {
+    const bridge = trackBridge(new CrewMonitorBridge(lifecycle, emitter));
+    const worker = trackWorker(makeWorker("task-before-dispose"));
+    addWorker(worker);
+
+    const sessionId = bridge.getSessionId(worker.taskId, worker.cwd)!;
     bridge.dispose();
-    expect(mockListeners.size).toBe(0);
-  });
 
-  it("dispose() is idempotent", () => {
-    const bridge = new CrewMonitorBridge(lifecycle, emitter);
-    bridge.dispose();
-    expect(() => bridge.dispose()).not.toThrow();
-  });
-
-  // ─── MonitorRegistry integration ──────────────────────────────────────────
-
-  it("accepts a MonitorRegistry and wires lifecycle+emitter from it", () => {
-    const registry = createMonitorRegistry();
-    const bridge = createCrewMonitorBridge(registry);
-
-    const worker = makeWorker("task-registry");
-    mockWorkers.set(workerKey(worker.cwd, worker.taskId), worker);
-    notifyListeners();
+    const laterWorker = trackWorker(makeWorker("task-after-dispose", { name: "Ignored Worker" }));
+    addWorker(laterWorker);
 
     expect(bridge.sessionCount).toBe(1);
-    const sessionId = bridge.getSessionId("task-registry");
-    expect(sessionId).toBeDefined();
-    expect(registry.store.get(sessionId!)?.status).toBe("active");
+    expect(bridge.getSessionId(laterWorker.taskId, laterWorker.cwd)).toBeUndefined();
+    expect(store.get(sessionId)?.status).toBe("active");
+  });
 
-    bridge.dispose();
+  it("can be created from a registry and respects cwd filtering", () => {
+    const registry = createMonitorRegistry();
+    const bridge = trackBridge(createCrewMonitorBridge(registry, { cwd: "/tmp/project-a" }));
+    const workerA = trackWorker(makeWorker("task-a", { cwd: "/tmp/project-a", name: "Project A Worker" }));
+    const workerB = trackWorker(makeWorker("task-b", { cwd: "/tmp/project-b", name: "Project B Worker" }));
+    addWorker(workerA);
+    addWorker(workerB);
+
+    expect(getLiveWorkers("/tmp/project-a").has("task-a")).toBe(true);
+    expect(getLiveWorkers("/tmp/project-a").has("task-b")).toBe(false);
+    expect(bridge.sessionCount).toBe(1);
+
+    const sessionId = bridge.getSessionId("task-a", "/tmp/project-a");
+    expect(sessionId).toBeDefined();
+    expect(registry.store.get(sessionId!)).toMatchObject({
+      status: "active",
+      metadata: { name: "Project A Worker", cwd: "/tmp/project-a" },
+    });
+
     registry.dispose();
   });
 
-  // ─── cwd filtering ────────────────────────────────────────────────────────
+  it("unsubscribes its listener on dispose", () => {
+    const before = onLiveWorkersChanged(() => {});
+    before();
 
-  it("filters workers by cwd when cwd option is provided", () => {
-    const bridge = new CrewMonitorBridge(lifecycle, emitter, { cwd: "/tmp/project-a" });
-
-    const wA = makeWorker("task-cwd-a", { cwd: "/tmp/project-a" });
-    const wB = makeWorker("task-cwd-b", { cwd: "/tmp/project-b" });
-    mockWorkers.set(workerKey(wA.cwd, wA.taskId), wA);
-    mockWorkers.set(workerKey(wB.cwd, wB.taskId), wB);
-    notifyListeners();
-
-    // Only task-cwd-a should be tracked
-    expect(bridge.sessionCount).toBe(1);
-    expect(bridge.getSessionId("task-cwd-a", "/tmp/project-a")).toBeDefined();
-
+    const bridge = trackBridge(new CrewMonitorBridge(lifecycle, emitter));
     bridge.dispose();
+
+    const postDisposeWorker = trackWorker(makeWorker("task-post-dispose", { name: "Post Dispose Worker" }));
+    addWorker(postDisposeWorker);
+
+    expect(bridge.getSessionId(postDisposeWorker.taskId, postDisposeWorker.cwd)).toBeUndefined();
   });
 });

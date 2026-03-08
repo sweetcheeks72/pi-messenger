@@ -14,6 +14,7 @@ import {
   type SessionState,
   type SessionMetadata,
   type SessionMetrics,
+  type SessionHistoryEntry,
 } from "../types/session.js";
 
 // =============================================================================
@@ -124,6 +125,52 @@ export class SessionStore {
     const validated = SessionStateSchema.parse(merged);
     this.sessions.set(id, validated);
     return validated;
+  }
+
+  /**
+   * Append a projected session history entry without touching lifecycle status.
+   */
+  appendEvent(id: string, event: SessionHistoryEntry): SessionState {
+    const existing = this.sessions.get(id);
+    if (!existing) {
+      throw new Error(`Session not found: ${id}`);
+    }
+
+    return this.update(id, {
+      events: [...existing.events, event],
+    });
+  }
+
+  /**
+   * Refresh live metrics for a session from a computed snapshot.
+   */
+  refreshMetrics(id: string, metrics: Partial<SessionMetrics>): SessionState {
+    return this.update(id, { metrics });
+  }
+
+  /**
+   * Append a history event to a session unless an equivalent entry already exists.
+   * Keeps lifecycle status unchanged; callers should use lifecycle APIs for transitions.
+   */
+  appendHistoryEvent(id: string, event: SessionHistoryEntry): SessionState {
+    const existing = this.sessions.get(id);
+    if (!existing) {
+      throw new Error(`Session not found: ${id}`);
+    }
+
+    const duplicate = existing.events.some((entry) =>
+      entry.type === event.type &&
+      entry.timestamp === event.timestamp &&
+      JSON.stringify(entry.data ?? null) === JSON.stringify(event.data ?? null)
+    );
+
+    if (duplicate) {
+      return existing;
+    }
+
+    return this.update(id, {
+      events: [...existing.events, event],
+    });
   }
 
   /**

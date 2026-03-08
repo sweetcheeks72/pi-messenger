@@ -18,6 +18,7 @@ import type { LiveWorkerInfo } from "../../crew/live-progress.js";
 import type { SessionLifecycleManager } from "./lifecycle/manager.js";
 import type { SessionEventEmitter } from "./events/emitter.js";
 import type { MonitorRegistry } from "./registry.js";
+import type { SessionStore } from "./store/session-store.js";
 
 /** Stable string key for a worker: `${cwd}::${taskId}` */
 function workerKey(cwd: string, taskId: string): string {
@@ -32,6 +33,7 @@ export interface CrewMonitorBridgeOptions {
 export class CrewMonitorBridge {
   private readonly lifecycle: SessionLifecycleManager;
   private readonly emitter: SessionEventEmitter;
+  private readonly store: SessionStore;
   private readonly cwd: string | undefined;
 
   /** taskKey → monitorSessionId */
@@ -53,6 +55,7 @@ export class CrewMonitorBridge {
       const registry = lifecycleOrRegistry as MonitorRegistry;
       this.lifecycle = registry.lifecycle;
       this.emitter = registry.emitter;
+      this.store = registry.store;
       this.cwd =
         emitterOrOptions && !("subscribe" in emitterOrOptions)
           ? (emitterOrOptions as CrewMonitorBridgeOptions).cwd
@@ -61,6 +64,7 @@ export class CrewMonitorBridge {
       // SessionLifecycleManager path
       this.lifecycle = lifecycleOrRegistry as SessionLifecycleManager;
       this.emitter = emitterOrOptions as SessionEventEmitter;
+      this.store = this.lifecycle.getStore();
       this.cwd = options?.cwd;
     }
 
@@ -108,7 +112,7 @@ export class CrewMonitorBridge {
   }
 
   private addWorker(key: string, worker: LiveWorkerInfo): void {
-    const sessionId = this.lifecycle.start({
+    const sessionId = this.findExistingSessionId(worker) ?? this.lifecycle.start({
       name: worker.name,
       cwd: worker.cwd,
       model: worker.progress.model ?? "unknown",
@@ -133,6 +137,16 @@ export class CrewMonitorBridge {
     }
     this.taskSessionMap.delete(key);
     this.lastToolMap.delete(key);
+  }
+
+  private findExistingSessionId(worker: LiveWorkerInfo): string | undefined {
+    const existing = this.store.list().find((session) =>
+      session.metadata.cwd === worker.cwd &&
+      session.metadata.taskId === worker.taskId &&
+      (session.status === "active" || session.status === "paused")
+    );
+
+    return existing?.metadata.id;
   }
 
   private checkToolChange(key: string, worker: LiveWorkerInfo): void {

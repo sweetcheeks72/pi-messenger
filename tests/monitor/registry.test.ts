@@ -12,15 +12,15 @@ describe("MonitorRegistry", () => {
     const registry = createMonitorRegistry();
 
     expect(registry).toBeInstanceOf(MonitorRegistry);
-    expect(registry.store).toBeDefined();
-    expect(registry.emitter).toBeDefined();
-    expect(registry.lifecycle).toBeDefined();
-    expect(registry.aggregator).toBeDefined();
-    expect(registry.commandHandler).toBeDefined();
-    expect(registry.healthMonitor).toBeDefined();
-    expect(registry.replayer).toBeDefined();
-    expect(registry.exporter).toBeDefined();
-    expect(registry.feedSubscriber).toBeDefined();
+    expect(registry.lifecycle.getStore()).toBe(registry.store);
+    expect(registry.lifecycle.getEmitter()).toBe(registry.emitter);
+    expect(registry.feedSubscriber.getBuffer()).toEqual([]);
+    expect(registry.aggregator.computeMetrics("missing-session")).toMatchObject({
+      totalEvents: 0,
+      errorCount: 0,
+      toolCalls: 0,
+    });
+    expect(() => registry.exporter.toJSON("missing-session")).toThrow("Session not found");
 
     const sessionId = registry.lifecycle.start({
       name: "registry-session",

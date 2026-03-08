@@ -7,7 +7,6 @@ import { matchesKey, visibleWidth } from "@mariozechner/pi-tui";
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import type { MonitorRegistry } from "./src/monitor/registry.js";
 import { AttentionQueuePanel } from "./src/monitor/ui/attention.js";
-import { CrewMonitorBridge, createCrewMonitorBridge } from "./src/monitor/bridge.js";
 import {
   extractFolder,
   formatDuration,
@@ -78,7 +77,6 @@ export class MessengerOverlay implements Component, Focusable {
   private wasPlanning: boolean;
   private prevInProgressCount = 0;
   private registry: MonitorRegistry | undefined;
-  private bridge: CrewMonitorBridge | undefined;
   private healthAlertUnsubscribe: (() => void) | null = null;
   /** Whether the overlay is showing the replay view within monitor-detail */
   private replayMode = false;
@@ -98,7 +96,6 @@ export class MessengerOverlay implements Component, Focusable {
     this.cwd = process.cwd();
     this.registry = registry;
     if (registry) {
-      this.bridge = createCrewMonitorBridge(registry, { cwd: this.cwd });
       this.healthAlertUnsubscribe = registry.healthMonitor.onAlert((alert) => {
         const statusLabel = alert.status === "critical" ? "🔴" : "🟡";
         const message = `${statusLabel} Session ${alert.sessionId.slice(0, 8)} ${alert.status}: ${alert.reason}`;
@@ -106,8 +103,6 @@ export class MessengerOverlay implements Component, Focusable {
         setNotification(this.crewViewState, this.tui, alert.status === "critical", message);
         this.tui.requestRender();
       });
-
-      registry.healthMonitor.start(registry.pollIntervalMs);
 
       this.attentionPanel = new AttentionQueuePanel();
       this.attentionPanel.onSelect((item) => {
@@ -907,11 +902,8 @@ export class MessengerOverlay implements Component, Focusable {
       clearTimeout(this.crewViewState.notificationTimer);
       this.crewViewState.notificationTimer = null;
     }
-    this.bridge?.dispose();
-    this.bridge = undefined;
     this.healthAlertUnsubscribe?.();
     this.healthAlertUnsubscribe = null;
-    this.registry?.healthMonitor.stop();
     this.attentionPanel?.dispose();
     this.attentionPanel = undefined;
     this.progressUnsubscribe?.();

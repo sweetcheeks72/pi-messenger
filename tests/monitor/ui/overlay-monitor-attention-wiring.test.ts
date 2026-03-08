@@ -73,7 +73,7 @@ function makeTui() {
 }
 
 describe("overlay monitor attention wiring", () => {
-  it("starts the health monitor on construct and stops it on dispose", () => {
+  it("does not own the health monitor lifecycle", () => {
     const registry = makeRegistry();
     const startSpy = vi.spyOn(registry.healthMonitor, "start");
     const stopSpy = vi.spyOn(registry.healthMonitor, "stop");
@@ -88,11 +88,11 @@ describe("overlay monitor attention wiring", () => {
       registry,
     );
 
-    expect(startSpy).toHaveBeenCalledWith(registry.pollIntervalMs);
+    expect(startSpy).not.toHaveBeenCalled();
 
     overlay.dispose();
 
-    expect(stopSpy).toHaveBeenCalled();
+    expect(stopSpy).not.toHaveBeenCalled();
     registry.dispose();
   });
 

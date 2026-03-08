@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { OperatorCommandHandler, createOperatorCommandHandler } from "../../../src/monitor/commands/handler.js";
 import { SessionLifecycleManager } from "../../../src/monitor/lifecycle/manager.js";
 import type { OperatorCommand, CommandValidator } from "../../../src/monitor/types/commands.js";
+import { registerWorker, killAll } from "../../../crew/registry.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -29,6 +30,10 @@ describe("OperatorCommandHandler", () => {
   beforeEach(() => {
     lifecycle = new SessionLifecycleManager();
     handler = new OperatorCommandHandler(lifecycle);
+  });
+
+  afterEach(() => {
+    killAll();
   });
 
   // ── constructor / factory ─────────────────────────────────────────────────
@@ -99,7 +104,7 @@ describe("OperatorCommandHandler", () => {
     const result = handler.execute(cmd);
     expect(result.success).toBe(true);
     expect(result.command).toEqual(cmd);
-    expect(result.executedAt).toBeTruthy();
+    expect(new Date(result.executedAt).toISOString()).toBe(result.executedAt);
     const state = result.result as { status: string };
     expect(state.status).toBe("paused");
   });
@@ -117,6 +122,32 @@ describe("OperatorCommandHandler", () => {
     const sessionId = makeActiveSession(lifecycle);
     const result = handler.execute({ action: "end", sessionId, reason: "done" });
     expect(result.success).toBe(true);
+    const state = result.result as { status: string };
+    expect(state.status).toBe("ended");
+  });
+
+  it("execute end kills a live crew worker when the session is backed by a task", () => {
+    const kill = vi.fn();
+    registerWorker({
+      type: "worker",
+      cwd: "/tmp",
+      taskId: "task-live",
+      name: "Worker",
+      proc: { exitCode: null, killed: false, kill } as any,
+    });
+    const sessionId = lifecycle.start({
+      id: "sess-live-worker",
+      name: "Live Worker Session",
+      cwd: "/tmp",
+      model: "test-model",
+      agent: "test-agent",
+      taskId: "task-live",
+    });
+
+    const result = handler.execute({ action: "end", sessionId, reason: "stop worker" });
+
+    expect(result.success).toBe(true);
+    expect(kill).toHaveBeenCalledWith("SIGTERM");
     const state = result.result as { status: string };
     expect(state.status).toBe("ended");
   });
@@ -144,7 +175,7 @@ describe("OperatorCommandHandler", () => {
     const sessionId = makeActiveSession(lifecycle);
     const result = handler.execute({ action: "pause", sessionId });
     expect(result.success).toBe(false);
-    expect(result.error).toBeTruthy();
+    expect(result.error).toBe('Action "pause" is not allowed. Allowed actions: resume.');
     expect(result.command.action).toBe("pause");
   });
 
@@ -159,7 +190,7 @@ describe("OperatorCommandHandler", () => {
     handler.execute({ action: "end", sessionId });
     const result = handler.execute({ action: "pause", sessionId });
     expect(result.success).toBe(false);
-    expect(result.error).toBeTruthy();
+    expect(result.error).toContain(`Invalid lifecycle transition for session "${sessionId}": ended → paused.`);
   });
 
   // ── maxConcurrent ────────────────────────────────────────────────────────
@@ -186,8 +217,8 @@ describe("OperatorCommandHandler", () => {
   it("failure result includes error string and no result field", () => {
     const result = handler.execute({ action: "resume", sessionId: "ghost" });
     expect(result.success).toBe(false);
-    expect(typeof result.error).toBe("string");
-    expect(result.error!.length).toBeGreaterThan(0);
+    expect(result.error).toBe("Session not found: ghost");
+    expect(result).not.toHaveProperty("result");
   });
 
   // ── setValidator ────────────────────────────────────────────────────────

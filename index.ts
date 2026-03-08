@@ -45,6 +45,7 @@ import { executeCrewAction } from "./crew/index.js";
 import { logFeedEvent, pruneFeed } from "./feed.js";
 import type { CrewParams } from "./crew/types.js";
 import { createMonitorRegistry, type MonitorRegistry } from "./src/monitor/registry.js";
+import { createCrewMonitorBridge, type CrewMonitorBridge } from "./src/monitor/bridge.js";
 import {
   autonomousState,
   clearPlanningState,
@@ -71,6 +72,7 @@ let overlayTui: TUI | null = null;
 let overlayHandle: OverlayHandle | null = null;
 let overlayOpening = false;
 let monitorRegistry: MonitorRegistry | undefined;
+let monitorBridge: CrewMonitorBridge | undefined;
 
 export default function piMessengerExtension(pi: ExtensionAPI) {
   // One-time migration: remove stale crew agents from shared ~/.pi/agent/agents/
@@ -757,7 +759,12 @@ Usage (action-based API - preferred):
 
   pi.on("session_start", async (_event, ctx) => {
     latestCtx = ctx;
+    monitorBridge?.dispose();
+    monitorBridge = undefined;
+    monitorRegistry?.dispose();
     monitorRegistry = createMonitorRegistry();
+    monitorBridge = createCrewMonitorBridge(monitorRegistry, { cwd: ctx.cwd ?? process.cwd() });
+    monitorRegistry.healthMonitor.start(monitorRegistry.pollIntervalMs);
     startStatusHeartbeat();
     for (const entry of ctx.sessionManager.getEntries()) {
       if (entry.type === "custom" && entry.customType === "crew-state") {
@@ -1014,6 +1021,8 @@ Usage (action-based API - preferred):
   });
 
   pi.on("session_shutdown", async () => {
+    monitorBridge?.dispose();
+    monitorBridge = undefined;
     monitorRegistry?.dispose();
     monitorRegistry = undefined;
     shutdownLobbyWorkers(process.cwd());

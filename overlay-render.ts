@@ -35,6 +35,7 @@ import {
 } from "./crew/state.js";
 import type { Task } from "./crew/types.js";
 import { getLiveWorkers, type LiveWorkerInfo } from "./crew/live-progress.js";
+import { hasActiveWorker } from "./crew/registry.js";
 import type { ToolEntry } from "./crew/utils/progress.js";
 import { formatFeedLine as sharedFormatFeedLine, type FeedEvent } from "./feed.js";
 import { discoverCrewAgents } from "./crew/utils/discover.js";
@@ -538,11 +539,14 @@ export function renderLegend(
     const sessions = registry?.store.list() ?? [];
     const session = sessions[viewState.monitorSelectedIndex];
     if (session) {
-      if (session.status === "active") hints.push("p:Pause");
-      else if (session.status === "paused") hints.push("p:Resume");
+      const liveWorkerBacked = Boolean(session.metadata.taskId) && hasActiveWorker(session.metadata.cwd, session.metadata.taskId);
+      if (!liveWorkerBacked) {
+        if (session.status === "active") hints.push("p:Pause");
+        else if (session.status === "paused") hints.push("p:Resume");
+      }
       if (session.status !== "ended" && session.status !== "error") hints.push("e:End");
     }
-    hints.push("i:Inspect", "↑↓:Scroll", "Esc:Back");
+    hints.push("i:Snapshot", "↑↓:Scroll", "Esc:Back");
     return truncateToWidth(scrollPrefix + theme.fg("dim", appendUniversalHints(hints.join("  "))), width);
   }
 

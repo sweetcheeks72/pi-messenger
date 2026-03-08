@@ -11,6 +11,8 @@ import { SessionReplayer } from "./replay/replayer.js";
 import { SessionExporter } from "./export/exporter.js";
 import { SessionFeedSubscriber } from "./feed/subscriber.js";
 import type { HealthThresholds } from "./health/types.js";
+import type { SessionHistoryEntry } from "./types/session.js";
+import type { SessionHistoryEntry, SessionMetrics } from "./types/session.js";
 
 // ─── Health config defaults ───────────────────────────────────────────────────
 
@@ -102,7 +104,50 @@ function resolveHealthConfig(raw: CrewHealthConfig): {
   };
 }
 
+function toSessionHistoryEntry(event: SessionEvent): SessionHistoryEntry {
+  return {
+    type: event.type,
+    timestamp: new Date(event.timestamp).toISOString(),
+    ...(event.payload !== undefined ? { data: event.payload } : {}),
+  };
+}
+
+function toStoreMetrics(event: SessionEvent, store: SessionStore, aggregator: SessionMetricsAggregator): Partial<SessionMetrics> {
+  const computed = aggregator.computeMetrics(event.sessionId);
+  const existing = store.get(event.sessionId);
+
+  return {
+    duration: computed.activeDurationMs,
+    eventCount: computed.totalEvents,
+    errorCount: computed.errorCount,
+    toolCalls: computed.toolCalls,
+    tokensUsed: existing?.metrics.tokensUsed ?? 0,
+  };
+}
+
+function toExportEvent(sessionId: string, entry: SessionHistoryEntry, sequence: number): SessionEvent {
+  return {
+    id: `${sessionId}:${sequence}:${entry.type}`,
+    type: entry.type as SessionEvent["type"],
+    sessionId,
+    timestamp: Date.parse(entry.timestamp),
+    sequence,
+    payload: {
+      type: entry.type,
+      ...(entry.data && typeof entry.data === "object" ? (entry.data as Record<string, unknown>) : {}),
+    } as SessionEvent["payload"],
+  };
+}
+
 // ─── MonitorRegistry ─────────────────────────────────────────────────────────
+
+function toSessionHistoryEntry(event: SessionEvent): SessionHistoryEntry {
+  return {
+    type: event.type,
+    timestamp: new Date(event.timestamp).toISOString(),
+    ...(event.payload !== undefined ? { data: event.payload } : {}),
+  };
+}
 
 export class MonitorRegistry {
   readonly store: SessionStore;
@@ -119,21 +164,59 @@ export class MonitorRegistry {
   readonly pollIntervalMs: number;
 
   private disposed = false;
+  private emitterProjectionUnsub: (() => void) | null = null;
+  private readonly projectionUnsub: () => void;
 
   constructor(options?: MonitorRegistryOptions) {
     this.store = new SessionStore();
     this.emitter = new SessionEventEmitter();
     this.lifecycle = new SessionLifecycleManager(this.store, this.emitter);
     this.aggregator = new SessionMetricsAggregator(this.emitter, this.store);
+    this.projectionUnsub = this.emitter.subscribe((event) => {
+      const session = this.store.get(event.sessionId);
+      if (!session) {
+        return;
+      }
+
+      this.store.appendEvent(event.sessionId, toSessionHistoryEntry(event));
+      this.store.refreshMetrics(event.sessionId, toStoreMetrics(event, this.store, this.aggregator));
+    });
     this.commandHandler = new OperatorCommandHandler(this.lifecycle);
     this.healthMonitor = new SessionHealthMonitor(this.store, this.emitter, this.aggregator);
     this.replayer = new SessionReplayer(this.emitter, this.aggregator);
     this.exporter = new SessionExporter(
       (id) => this.store.get(id),
-      (id) => this.emitter.getHistory().filter((event: SessionEvent) => event.sessionId === id),
+      (id) => {
+        const session = this.store.get(id);
+        return session ? session.events.map((event, index) => toExportEvent(id, event, index)) : [];
+      },
     );
     this.feedSubscriber = new SessionFeedSubscriber(this.emitter);
     this.feedSubscriber.subscribe();
+    this.emitterProjectionUnsub = this.emitter.subscribe((event) => {
+      const existing = this.store.get(event.sessionId);
+      if (!existing) {
+        return;
+      }
+
+      this.store.appendHistoryEvent(event.sessionId, toSessionHistoryEntry(event));
+
+      const metrics = this.aggregator.computeMetrics(event.sessionId);
+      const current = this.store.get(event.sessionId);
+      if (!current) {
+        return;
+      }
+
+      this.store.update(event.sessionId, {
+        metrics: {
+          duration: metrics.activeDurationMs,
+          eventCount: metrics.totalEvents,
+          errorCount: metrics.errorCount,
+          toolCalls: metrics.toolCalls,
+          tokensUsed: current.metrics.tokensUsed,
+        },
+      });
+    });
 
     // Apply health thresholds from config
     const rawHealthConfig =
@@ -157,6 +240,7 @@ export class MonitorRegistry {
     this.disposed = true;
     this.healthMonitor.stop();
     this.feedSubscriber.unsubscribe();
+    this.projectionUnsub();
     this.aggregator.destroy();
   }
 }

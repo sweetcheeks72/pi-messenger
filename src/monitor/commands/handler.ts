@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { hasActiveWorker, killWorkerByTask } from "../../../crew/registry.js";
 import { SessionLifecycleManager } from "../lifecycle/manager.js";
 import type {
   OperatorCommand,
@@ -148,8 +149,17 @@ export class OperatorCommandHandler {
       }
 
       case "end": {
-        this.lifecycle.end(sessionId, command.reason);
         const store = this.lifecycle.getStore();
+        const session = store.get(sessionId);
+        if (!session) {
+          throw new Error(`Session not found: ${sessionId}`);
+        }
+        const taskId = session.metadata.taskId;
+        const cwd = session.metadata.cwd;
+        if (taskId && hasActiveWorker(cwd, taskId)) {
+          killWorkerByTask(cwd, taskId);
+        }
+        this.lifecycle.end(sessionId, command.reason);
         return store.get(sessionId);
       }
 

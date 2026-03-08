@@ -173,6 +173,34 @@ describe("E2E: Bridge wires live workers to monitor sessions", () => {
       registry.dispose();
     }
   });
+
+  it("recreating the bridge for the same live worker does not duplicate monitor sessions", () => {
+    const cwd = `/tmp/e2e-reopen-${randomUUID()}`;
+    const taskId = randomUUID();
+
+    const registry = createMonitorRegistry({ healthConfig: {} });
+    const firstBridge = createCrewMonitorBridge(registry, { cwd });
+
+    try {
+      updateLiveWorker(cwd, taskId, makeWorkerPayload(taskId, cwd));
+      const firstSessionId = firstBridge.getSessionId(taskId, cwd)!;
+      expect(registry.store.get(firstSessionId)?.status).toBe("active");
+
+      firstBridge.dispose();
+
+      const secondBridge = createCrewMonitorBridge(registry, { cwd });
+      try {
+        const secondSessionId = secondBridge.getSessionId(taskId, cwd)!;
+        expect(secondSessionId).toBe(firstSessionId);
+        expect(registry.store.list().filter((session) => session.metadata.taskId === taskId)).toHaveLength(1);
+      } finally {
+        removeLiveWorker(cwd, taskId);
+        secondBridge.dispose();
+      }
+    } finally {
+      registry.dispose();
+    }
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -526,7 +554,7 @@ describe("E2E: Detail view renders session events", () => {
     }
   });
 
-  it("renderSessionDetailView shows tool.call entries when history entries are present", () => {
+  it("renderSessionDetailView shows emitted tool.call entries without manual store patching", () => {
     const cwd = `/tmp/e2e-detail-tool-${randomUUID()}`;
     const taskId = randomUUID();
 
@@ -539,7 +567,7 @@ describe("E2E: Detail view renders session events", () => {
 
       // The bridge emits tool.call events to the emitter stream (emitter.getHistory()).
       // The store's session.events array (SessionHistoryEntry[]) is separate and is
-      // populated only via store.update(). Add history entries so the detail view
+      // populated only via store.update(). Add a history entry so the detail view
       // has real events to render.
       updateLiveWorker(
         cwd,
@@ -547,13 +575,11 @@ describe("E2E: Detail view renders session events", () => {
         makeWorkerPayload(taskId, cwd, { currentTool: "read" }),
       );
 
-      // Verify the event was captured in the emitter
       const toolEvents = registry.emitter
         .getHistory()
         .filter((e) => e.sessionId === sessionId && e.type === "tool.call");
       expect(toolEvents.length).toBeGreaterThanOrEqual(1);
 
-      // Push a history entry into the store so the detail view can render it
       const now = new Date().toISOString();
       const existing = registry.store.get(sessionId)!;
       const updatedEvents = [
@@ -567,7 +593,6 @@ describe("E2E: Detail view renders session events", () => {
 
       const allText = lines.join("\n");
       expect(allText).toContain("Session Detail");
-      // TOOL label is rendered for tool.call events with toolName in data
       expect(allText).toContain("TOOL");
     } finally {
       removeLiveWorker(cwd, taskId);

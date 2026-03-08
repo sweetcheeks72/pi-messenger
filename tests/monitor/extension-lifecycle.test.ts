@@ -14,10 +14,13 @@ describe("MonitorRegistry extension lifecycle wiring", () => {
   it("createMonitorRegistry produces a MonitorRegistry instance with all services", () => {
     const registry = createMonitorRegistry();
     expect(registry).toBeInstanceOf(MonitorRegistry);
-    expect(registry.store).toBeDefined();
-    expect(registry.emitter).toBeDefined();
-    expect(registry.lifecycle).toBeDefined();
-    expect(registry.healthMonitor).toBeDefined();
+    expect(registry.lifecycle.getStore()).toBe(registry.store);
+    expect(registry.lifecycle.getEmitter()).toBe(registry.emitter);
+    expect(registry.healthMonitor.getSessionHealth("missing-session")).toMatchObject({
+      sessionId: "missing-session",
+      state: "healthy",
+      actionable: false,
+    });
     registry.dispose();
   });
 
@@ -38,6 +41,53 @@ describe("MonitorRegistry extension lifecycle wiring", () => {
     const registry2 = createMonitorRegistry();
     expect(registry2.store.get(sessionId)).toBeUndefined();
     registry2.dispose();
+  });
+
+  it("session-scoped registry can keep tracking workers after an overlay closes", async () => {
+    const { createCrewMonitorBridge } = await import("../../src/monitor/bridge.js");
+    const { updateLiveWorker, removeLiveWorker } = await import("../../crew/live-progress.js");
+
+    const cwd = `/tmp/overlay-close-${Date.now()}`;
+    const taskId = "task-overlay-close";
+    const registry = createMonitorRegistry({ healthConfig: {} });
+    const bridge = createCrewMonitorBridge(registry, { cwd });
+
+    try {
+      updateLiveWorker(cwd, taskId, {
+        taskId,
+        agent: "TestAgent",
+        name: "worker-overlay-close",
+        startedAt: Date.now(),
+        progress: {
+          agent: "TestAgent",
+          status: "running",
+          recentTools: [],
+          toolCallCount: 0,
+          tokens: 0,
+          durationMs: 0,
+          filesModified: [],
+          toolCallBuckets: [],
+        },
+      });
+
+      const sessionId = bridge.getSessionId(taskId, cwd);
+      expect(sessionId).toBeDefined();
+      expect(registry.store.get(sessionId!)).toMatchObject({
+        status: "active",
+        metadata: {
+          taskId,
+          cwd,
+          name: "worker-overlay-close",
+        },
+      });
+
+      // Overlay close should not dispose the session-scoped bridge/registry.
+      expect(bridge.sessionCount).toBe(1);
+    } finally {
+      removeLiveWorker(cwd, taskId);
+      bridge.dispose();
+      registry.dispose();
+    }
   });
 
   it("registry passed to overlay stores correctly — structural check via optional pattern", () => {
