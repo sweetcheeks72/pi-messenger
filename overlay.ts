@@ -6,6 +6,7 @@ import type { Component, Focusable, TUI } from "@mariozechner/pi-tui";
 import { matchesKey, visibleWidth } from "@mariozechner/pi-tui";
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import type { MonitorRegistry } from "./src/monitor/registry.js";
+import { CrewMonitorBridge, createCrewMonitorBridge } from "./src/monitor/bridge.js";
 import {
   extractFolder,
   formatDuration,
@@ -68,6 +69,7 @@ export class MessengerOverlay implements Component, Focusable {
   private wasPlanning: boolean;
   private prevInProgressCount = 0;
   private registry: MonitorRegistry | undefined;
+  private bridge: CrewMonitorBridge | undefined;
 
   constructor(
     private tui: TUI,
@@ -80,6 +82,9 @@ export class MessengerOverlay implements Component, Focusable {
   ) {
     this.cwd = process.cwd();
     this.registry = registry;
+    if (registry) {
+      this.bridge = createCrewMonitorBridge(registry, { cwd: this.cwd });
+    }
     const cfg = loadConfig(this.cwd);
     this.stuckThresholdMs = cfg.stuckThreshold * 1000;
 
@@ -792,6 +797,8 @@ export class MessengerOverlay implements Component, Focusable {
       clearTimeout(this.crewViewState.notificationTimer);
       this.crewViewState.notificationTimer = null;
     }
+    this.bridge?.dispose();
+    this.bridge = undefined;
     this.progressUnsubscribe?.();
     this.progressUnsubscribe = null;
   }
