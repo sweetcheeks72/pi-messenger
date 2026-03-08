@@ -7,7 +7,6 @@ import { matchesKey, visibleWidth } from "@mariozechner/pi-tui";
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import type { MonitorRegistry } from "./src/monitor/registry.js";
 import { AttentionQueuePanel } from "./src/monitor/ui/attention.js";
-import { deriveAttentionItems } from "./src/monitor/attention/derivation.js";
 import { CrewMonitorBridge, createCrewMonitorBridge } from "./src/monitor/bridge.js";
 import {
   extractFolder,
@@ -33,8 +32,10 @@ import {
   renderDetailView,
   renderMonitorView,
   renderMonitorDetailView,
+  buildHealthMapFromSessions,
   navigateTask,
 } from "./overlay-render.js";
+import { deriveAttentionItems } from "./src/monitor/attention/derivation.js";
 import { renderReplayView } from "./overlay-render-replay.js";
 import {
   createCrewViewState,
@@ -105,6 +106,8 @@ export class MessengerOverlay implements Component, Focusable {
         setNotification(this.crewViewState, this.tui, alert.status === "critical", message);
         this.tui.requestRender();
       });
+
+      registry.healthMonitor.start(registry.pollIntervalMs);
 
       this.attentionPanel = new AttentionQueuePanel();
       this.attentionPanel.onSelect((item) => {
@@ -708,7 +711,9 @@ export class MessengerOverlay implements Component, Focusable {
     } else if (this.crewViewState.mode === "monitor") {
       if (this.attentionPanel && this.registry) {
         const sessions = this.registry.store.list();
-        this.attentionPanel.setItems(deriveAttentionItems(sessions, new Map(), new Map()));
+        const now = Date.now();
+        const healthMap = buildHealthMapFromSessions(sessions, now);
+        this.attentionPanel.setItems(deriveAttentionItems(sessions, healthMap, new Map(), now));
       }
       contentLines = renderMonitorView(this.registry, sectionW, contentHeight, this.crewViewState);
     } else if (this.crewViewState.mode === "detail" && selectedTask) {
@@ -906,6 +911,7 @@ export class MessengerOverlay implements Component, Focusable {
     this.bridge = undefined;
     this.healthAlertUnsubscribe?.();
     this.healthAlertUnsubscribe = null;
+    this.registry?.healthMonitor.stop();
     this.attentionPanel?.dispose();
     this.attentionPanel = undefined;
     this.progressUnsubscribe?.();

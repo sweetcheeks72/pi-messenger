@@ -73,7 +73,7 @@ function makeTui() {
 }
 
 describe("overlay monitor attention wiring", () => {
-  it("does not start the health monitor on construct; registry disposal stops it", () => {
+  it("starts the health monitor on construct and stops it on dispose", () => {
     const registry = makeRegistry();
     const startSpy = vi.spyOn(registry.healthMonitor, "start");
     const stopSpy = vi.spyOn(registry.healthMonitor, "stop");
@@ -88,13 +88,12 @@ describe("overlay monitor attention wiring", () => {
       registry,
     );
 
-    expect(startSpy).not.toHaveBeenCalled();
+    expect(startSpy).toHaveBeenCalledWith(registry.pollIntervalMs);
 
     overlay.dispose();
-    expect(stopSpy).not.toHaveBeenCalled();
 
-    registry.dispose();
     expect(stopSpy).toHaveBeenCalled();
+    registry.dispose();
   });
 
   it("renders the attention queue panel above the session list when actionable items exist", () => {
@@ -196,7 +195,7 @@ describe("overlay monitor attention wiring", () => {
     registry.dispose();
   });
 
-  it("falls back to the session list selection when the attention panel has no internal health-map item", () => {
+  it("uses the rendered health map for attention panel selection", () => {
     const registry = makeRegistry();
 
     registry.lifecycle.start({
@@ -236,7 +235,7 @@ describe("overlay monitor attention wiring", () => {
 
     const crewViewState = (overlay as any).crewViewState;
     expect(crewViewState.mode).toBe("monitor-detail");
-    expect(crewViewState.monitorSelectedIndex).toBe(0);
+    expect(crewViewState.monitorSelectedIndex).toBe(1);
 
     overlay.dispose();
     registry.dispose();

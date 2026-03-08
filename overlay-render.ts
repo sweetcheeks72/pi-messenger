@@ -858,7 +858,7 @@ const ANSI_RESET_ATTN = "\x1b[0m";
  * Build a health status map from sessions using lightweight heuristics.
  * Pure function — no side effects, no external calls.
  */
-function buildHealthMapFromSessions(
+export function buildHealthMapFromSessions(
   sessions: Array<{
     status: string;
     metadata: { id: string; startedAt: string };
