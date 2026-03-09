@@ -20,7 +20,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DEFAULT_EXTENSION_AGENTS_DIR = path.resolve(__dirname, "..", "agents");
 
-export type CrewRole = "planner" | "worker" | "reviewer" | "analyst";
+export type CrewRole =
+  | "scout"
+  | "planner"
+  | "worker"
+  | "reviewer"
+  | "verifier"
+  | "auditor"
+  | "researcher"
+  | "analyst";
 
 export interface CrewAgentConfig {
   name: string;

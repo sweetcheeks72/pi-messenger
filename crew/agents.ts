@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { discoverCrewAgents, type CrewAgentConfig } from "./utils/discover.js";
+import { discoverCrewAgents, type CrewAgentConfig, type CrewRole } from "./utils/discover.js";
 import { loadConfiguredPackageExtensions } from "./utils/extensions.js";
 import { truncateOutput } from "./utils/truncate.js";
 import {
@@ -76,6 +76,68 @@ export function resolveModel(
   agentModel?: string,
 ): string | undefined {
   return taskModel ?? paramModel ?? configModel ?? agentModel;
+}
+
+
+export function getConfigModelForRole(
+  role: CrewRole,
+  models?: CrewConfig["models"],
+): string | undefined {
+  switch (role) {
+    case "planner":
+      return models?.planner;
+    case "reviewer":
+    case "verifier":
+    case "auditor":
+      return models?.reviewer;
+    case "scout":
+    case "researcher":
+    case "analyst":
+      return models?.analyst;
+    case "worker":
+    default:
+      return models?.worker;
+  }
+}
+
+export function resolveModelForTaskRole(
+  role: CrewRole,
+  taskModel?: string,
+  paramModel?: string,
+  models?: CrewConfig["models"],
+  agentModel?: string,
+): string | undefined {
+  return resolveModel(taskModel, paramModel, getConfigModelForRole(role, models), agentModel);
+}
+
+const ROLE_ALIASES: Record<CrewRole, CrewRole[]> = {
+  scout: ["analyst"],
+  planner: [],
+  worker: [],
+  reviewer: [],
+  verifier: ["reviewer"],
+  auditor: ["reviewer"],
+  researcher: ["analyst"],
+  analyst: [],
+};
+
+export function selectCrewAgentForRole(
+  availableAgents: CrewAgentConfig[],
+  role: CrewRole,
+): CrewAgentConfig | undefined {
+  const exact = availableAgents.find(agent => agent.crewRole === role);
+  if (exact) return exact;
+
+  for (const alias of ROLE_ALIASES[role] ?? []) {
+    const aliasMatch = availableAgents.find(agent => agent.crewRole === alias);
+    if (aliasMatch) return aliasMatch;
+  }
+
+  const nameMatch = availableAgents.find(agent => agent.name === `crew-${role}` || agent.name.endsWith(`-${role}`));
+  if (nameMatch) return nameMatch;
+
+  return availableAgents.find(agent => agent.name === "crew-worker")
+    ?? availableAgents.find(agent => agent.crewRole === "worker");
 }
 
 export function pushModelArgs(args: string[], model: string): void {

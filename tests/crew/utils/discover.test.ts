@@ -155,6 +155,20 @@ Analyst prompt
     expect(agents[0].maxOutput).toEqual({ bytes: 2048, lines: 100 });
   });
 
+  it("parses Feynman scout role from frontmatter", () => {
+    writeAgent(path.join(extensionAgentsDir, "crew-scout.md"), `---
+name: crew-scout
+description: Scout
+crewRole: scout
+---
+Scout prompt
+`);
+
+    const agents = discoverCrewAgents(dirs.cwd, extensionAgentsDir, userAgentsDir);
+    expect(agents).toHaveLength(1);
+    expect(agents[0].crewRole).toBe("scout");
+  });
+
   // --- user-level agent discovery tests ---
 
   it("discovers user-level agents with source='user'", () => {

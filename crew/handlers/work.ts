@@ -9,9 +9,9 @@ import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { generateMemorableName, type Dirs } from "../../lib.js";
 import type { CrewParams, AppendEntryFn, AgentResult } from "../types.js";
 import { result } from "../utils/result.js";
-import { resolveModel, spawnAgents } from "../agents.js";
+import { resolveModel, resolveModelForTaskRole, selectCrewAgentForRole, spawnAgents } from "../agents.js";
 import { loadCrewConfig } from "../utils/config.js";
-import { discoverCrewAgents } from "../utils/discover.js";
+import { discoverCrewAgents, type CrewRole } from "../utils/discover.js";
 import { buildWorkerPrompt } from "../prompt.js";
 import * as store from "../store.js";
 import { getCrewDir } from "../store.js";
@@ -50,6 +50,42 @@ function fromNamespacedTaskId(taskId: string | undefined, crewNamespace: string)
   if (crewNamespace === "shared") return taskId;
   const prefix = `${crewNamespace}::`;
   return taskId.startsWith(prefix) ? taskId.slice(prefix.length) : taskId;
+}
+
+const FEYNMAN_ROLES: CrewRole[] = ["scout", "planner", "worker", "reviewer", "verifier", "auditor", "researcher", "analyst"];
+
+const ROLE_KEYWORDS: Array<{ role: CrewRole; patterns: RegExp[] }> = [
+  { role: "reviewer", patterns: [/\badversarial review\b/i, /\bcode review\b/i, /\breview\b/i] },
+  { role: "verifier", patterns: [/\binvariant\b/i, /\btrace\b/i, /\bverify\b/i, /\bcorrectness\b/i] },
+  { role: "auditor", patterns: [/\baudit\b/i, /\bfact\b/i, /\bclaim\b/i, /\bcompliance\b/i] },
+  { role: "researcher", patterns: [/\bresearch\b/i, /\bbenchmark\b/i, /\bexternal\b/i, /\bdocs?\b/i] },
+  { role: "planner", patterns: [/\bplan\b/i, /\barchitecture\b/i, /\bdecomposition\b/i, /\broadmap\b/i, /\bdesign\b/i] },
+  { role: "scout", patterns: [/\brecon\b/i, /\bimpact analysis\b/i, /\bmap(ping)?\b/i, /\binventory\b/i, /\bexplore\b/i] },
+  { role: "worker", patterns: [/\bimplement\b/i, /\bfix\b/i, /\badd\b/i, /\bbuild\b/i, /\bedit(s)?\b/i, /\bmodify\b/i] },
+];
+
+function normalizeRole(value: string | undefined): CrewRole | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim().toLowerCase();
+  return FEYNMAN_ROLES.includes(normalized as CrewRole) ? normalized as CrewRole : undefined;
+}
+
+export function classifyTaskToFeynmanRole(
+  title: string,
+  spec?: string,
+  preferredRole?: string,
+): CrewRole {
+  const explicit = normalizeRole(preferredRole);
+  if (explicit) return explicit;
+
+  const text = `${title}
+${spec ?? ""}`;
+  for (const entry of ROLE_KEYWORDS) {
+    if (entry.patterns.some(pattern => pattern.test(text))) {
+      return entry.role;
+    }
+  }
+  return "worker";
 }
 
 
@@ -475,7 +511,7 @@ async function spawnDualWorkers(
   const taskIdNs = namespacedTaskId(task.id, crewNamespace);
   const workerTasks = [
     {
-      agent: "crew-worker",
+      agent: agentName,
       task: prompt,
       taskId: `${taskIdNs}-A`,
       modelOverride,
@@ -629,6 +665,8 @@ export async function execute(
   const pendingAssignments: Array<{
     task: typeof remainingTasks[number];
     workerName: string;
+    agentName: string;
+    routedRole: CrewRole;
     modelOverride: string | undefined;
   }> = [];
 
@@ -647,16 +685,28 @@ export async function execute(
     });
     if (!updatedTask) continue;
 
+    const preferredRole = (currentTask as { preferred_role?: string; crew_role?: string; role?: string }).preferred_role
+      ?? (currentTask as { preferred_role?: string; crew_role?: string; role?: string }).crew_role
+      ?? (currentTask as { preferred_role?: string; crew_role?: string; role?: string }).role;
+    const spec = store.getTaskSpec(cwd, task.id) ?? "";
+    const routedRole = classifyTaskToFeynmanRole(task.title, spec, preferredRole);
+    const routedAgent = selectCrewAgentForRole(availableAgents, routedRole);
+    const agentName = routedAgent?.name ?? "crew-worker";
+
     pendingAssignments.push({
       task: currentTask,
       workerName,
-      modelOverride: resolveModel(
+      agentName,
+      routedRole,
+      modelOverride: resolveModelForTaskRole(
+        routedRole,
         task.model,
         params.model,
-        config.models?.worker,
+        config.models,
+        routedAgent?.model,
       ),
     });
-    store.appendTaskProgress(cwd, task.id, "system", `Assigned to ${workerName} via crew-worker (attempt ${currentTask.attempt_count + 1})`);
+    store.appendTaskProgress(cwd, task.id, "system", `Assigned to ${workerName} via ${agentName} [${routedRole}] (attempt ${currentTask.attempt_count + 1})`);
   }
 
   // Separate critical tasks for dual-worker verification
@@ -712,12 +762,12 @@ export async function execute(
     criticalPromises.push(promise);
   }
 
-  const workerTasks = normalAssignments.map(({ task, workerName, modelOverride }) => {
+  const workerTasks = normalAssignments.map(({ task, workerName, agentName, modelOverride }) => {
     const others = pendingAssignments.map(assignment => assignment.task).filter(other => other.id !== task.id);
     const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others);
 
     return {
-      agent: "crew-worker",
+      agent: agentName,
       task: prompt,
       taskId: namespacedTaskId(task.id, crewNamespace),
       modelOverride,

@@ -8,6 +8,12 @@ vi.mock("../../crew/agents.js", () => ({
   resolveModel: vi.fn((taskModel?: string, paramModel?: string, configModel?: string, agentModel?: string) => (
     taskModel ?? paramModel ?? configModel ?? agentModel
   )),
+  resolveModelForTaskRole: vi.fn((_: string, taskModel?: string, paramModel?: string, models?: any, agentModel?: string) => (
+    taskModel ?? paramModel ?? models?.worker ?? agentModel
+  )),
+  selectCrewAgentForRole: vi.fn((agents: Array<{ name: string; crewRole?: string }>, role: string) => (
+    agents.find(a => a.crewRole === role) ?? agents.find(a => a.name === "crew-worker")
+  )),
   spawnAgents: vi.fn(),
 }));
 
