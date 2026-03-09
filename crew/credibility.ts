@@ -18,7 +18,7 @@ export interface AgentCredibility {
 }
 
 export interface CredibilityStore {
-  [agentName: string]: AgentCredibility;
+  [identity: string]: AgentCredibility;
 }
 
 const DEFAULT_STORE_PATH = path.join(
@@ -27,6 +27,11 @@ const DEFAULT_STORE_PATH = path.join(
 
 function getStorePath(): string {
   return process.env.PI_CREDIBILITY_FILE ?? DEFAULT_STORE_PATH;
+}
+
+function normalizeIdentity(identity: string): string {
+  const normalized = identity.trim();
+  return normalized.length > 0 ? normalized : "unknown";
 }
 
 /**
@@ -60,8 +65,9 @@ export function saveCredibility(store: CredibilityStore): void {
  */
 export function recordReviewOutcome(agentName: string, survived: boolean): AgentCredibility {
   const store = loadCredibility();
+  const identity = normalizeIdentity(agentName);
 
-  const existing = store[agentName] ?? {
+  const existing = store[identity] ?? {
     totalCompletions: 0,
     survivedReviews: 0,
     rejectedReviews: 0,
@@ -81,7 +87,7 @@ export function recordReviewOutcome(agentName: string, survived: boolean): Agent
     Math.round((existing.survivedReviews / existing.totalCompletions) * 10000) / 100;
   existing.lastUpdated = new Date().toISOString();
 
-  store[agentName] = existing;
+  store[identity] = existing;
   saveCredibility(store);
 
   return existing;
@@ -107,5 +113,5 @@ export function getReviewIntensity(agentName: string): "full" | "standard" | "li
  */
 export function getCredibility(agentName: string): AgentCredibility | null {
   const store = loadCredibility();
-  return store[agentName] ?? null;
+  return store[normalizeIdentity(agentName)] ?? null;
 }

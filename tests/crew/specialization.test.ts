@@ -170,6 +170,12 @@ describe("crew/specialization", () => {
       expect(registry.taskTypes.research?.agents["persist-agent"]).toBeDefined();
     });
 
+    it("normalizes blank identity to unknown", () => {
+      recordTaskOutcome("   ", "other", true, 1000);
+      const registry = loadRegistry();
+      expect(registry.taskTypes.other?.agents["unknown"]?.attempts).toBe(1);
+    });
+
     it("updates lastUpdated timestamp", () => {
       const before = new Date().toISOString();
       recordTaskOutcome("time-agent", "other", true, 1000);

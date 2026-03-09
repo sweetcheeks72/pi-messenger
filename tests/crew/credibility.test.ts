@@ -118,6 +118,12 @@ describe("crew/credibility", () => {
       expect(store["persistent-agent"].totalCompletions).toBe(1);
     });
 
+    it("normalizes blank identity to unknown", () => {
+      recordReviewOutcome("   ", true);
+      const cred = getCredibility("unknown");
+      expect(cred?.totalCompletions).toBe(1);
+    });
+
     it("sets lastUpdated to ISO-8601", () => {
       const before = new Date().toISOString();
       const result = recordReviewOutcome("time-agent", true);

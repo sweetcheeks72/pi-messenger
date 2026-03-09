@@ -38,6 +38,11 @@ function getStorePath(): string {
   return process.env.PI_SPECIALIZATION_FILE ?? DEFAULT_STORE_PATH;
 }
 
+function normalizeIdentity(modelOrAgent: string): string {
+  const normalized = modelOrAgent.trim();
+  return normalized.length > 0 ? normalized : "unknown";
+}
+
 /**
  * Load specialization registry from disk.
  * Returns empty registry if file doesn't exist or is invalid.
@@ -101,13 +106,14 @@ export function recordTaskOutcome(
   durationMs: number
 ): void {
   const registry = loadRegistry();
+  const identity = normalizeIdentity(modelOrAgent);
 
   if (!registry.taskTypes[taskType]) {
     registry.taskTypes[taskType] = { agents: {} };
   }
 
   const taskTypeEntry = registry.taskTypes[taskType]!;
-  const existing = taskTypeEntry.agents[modelOrAgent] ?? {
+  const existing = taskTypeEntry.agents[identity] ?? {
     attempts: 0,
     successes: 0,
     failures: 0,
@@ -128,7 +134,7 @@ export function recordTaskOutcome(
   existing.avgDurationMs = Math.round(totalDuration / existing.attempts);
   existing.score = Math.round((existing.successes / existing.attempts) * 10000) / 100;
 
-  taskTypeEntry.agents[modelOrAgent] = existing;
+  taskTypeEntry.agents[identity] = existing;
   registry.lastUpdated = new Date().toISOString();
 
   saveRegistry(registry);
