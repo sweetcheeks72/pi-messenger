@@ -617,3 +617,116 @@ export function getDisplayMode(agents: AgentRegistration[]): DisplayMode {
   
   return "same-folder";
 }
+
+// =============================================================================
+// Task Heartbeat Infrastructure
+// =============================================================================
+
+/** Map of active heartbeat timers: taskId → timer handle */
+const _heartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
+
+/** Map of last heartbeat timestamps: taskId → ISO string */
+export const heartbeatTimestamps = new Map<string, string>();
+
+/**
+ * Start auto-publishing task.heartbeat feed events for a given task.
+ *
+ * @param cwd        Working directory (determines feed path)
+ * @param agentName  Name of the agent emitting heartbeats
+ * @param taskId     ID of the in-progress task
+ * @param intervalMs How often to emit a heartbeat (default: 60 000 ms)
+ * @returns A cleanup function that stops the heartbeat
+ */
+export function startHeartbeat(
+  cwd: string,
+  agentName: string,
+  taskId: string,
+  intervalMs = 60_000
+): () => void {
+  // Stop any existing heartbeat for this task
+  stopHeartbeat(taskId);
+
+  // Lazily import to avoid circular dependency at module load time
+  // (feed.ts imports nothing from lib.ts, but lib.ts is used widely)
+  function emitHeartbeatEvent(): void {
+    try {
+      // Dynamic require is intentional here for lazy loading
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const feedModule = require("./feed.js") as typeof import("./feed.js");
+      const ts = new Date().toISOString();
+      heartbeatTimestamps.set(taskId, ts);
+      feedModule.appendFeedEvent(cwd, {
+        ts,
+        agent: agentName,
+        type: "task.heartbeat",
+        target: taskId,
+        heartbeat: { taskId, status: "active" },
+      });
+    } catch {
+      // Best-effort — if feed write fails, heartbeat silently skips
+    }
+  }
+
+  // Emit an initial heartbeat immediately
+  emitHeartbeatEvent();
+
+  const timer = setInterval(emitHeartbeatEvent, intervalMs);
+  _heartbeatTimers.set(taskId, timer);
+
+  return () => stopHeartbeat(taskId);
+}
+
+/**
+ * Stop the heartbeat for a given task and clean up its timestamp entry.
+ */
+export function stopHeartbeat(taskId: string): void {
+  const timer = _heartbeatTimers.get(taskId);
+  if (timer) {
+    clearInterval(timer);
+    _heartbeatTimers.delete(taskId);
+  }
+  heartbeatTimestamps.delete(taskId);
+}
+
+/**
+ * Check all active heartbeat timestamps and emit `heartbeat.stale` feed events
+ * for any task whose last heartbeat is older than `thresholdMs` (default: 120 s).
+ *
+ * Call this from a background poll loop (e.g. every 30 s) in the extension.
+ *
+ * @param cwd         Working directory for the feed
+ * @param agentName   Name of the agent performing the stale check
+ * @param thresholdMs Age threshold in milliseconds (default: 120 000 ms)
+ * @returns Array of taskIds whose heartbeats were found stale
+ */
+export function checkStaleHeartbeats(
+  cwd: string,
+  agentName: string,
+  thresholdMs = 120_000
+): string[] {
+  const stale: string[] = [];
+  const now = Date.now();
+
+  for (const [taskId, lastTs] of heartbeatTimestamps.entries()) {
+    const age = now - new Date(lastTs).getTime();
+    if (age > thresholdMs) {
+      stale.push(taskId);
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const feedModule = require("./feed.js") as typeof import("./feed.js");
+        feedModule.appendFeedEvent(cwd, {
+          ts: new Date().toISOString(),
+          agent: agentName,
+          type: "heartbeat.stale",
+          target: taskId,
+          preview: `No heartbeat for ${Math.round(age / 1000)}s (threshold: ${thresholdMs / 1000}s)`,
+        });
+      } catch {
+        // Best-effort
+      }
+    }
+  }
+
+  return stale;
+}
+

@@ -25,6 +25,9 @@ export type FeedEventType =
   | "task.split"
   | "task.revise"
   | "task.revise-tree"
+  | "task.progress"
+  | "task.escalate"
+  | "task.heartbeat"
   | "plan.start"
   | "plan.pass.start"
   | "plan.pass.done"
@@ -33,6 +36,7 @@ export type FeedEventType =
   | "plan.done"
   | "plan.cancel"
   | "plan.failed"
+  | "plan.archive"
   | "stuck"
   | "health"
   | "heartbeat.stale"
@@ -50,6 +54,12 @@ export interface FeedEvent {
   type: FeedEventType;
   target?: string;
   preview?: string;
+  // Structured progress payload (task.progress)
+  progress?: { percentage: number; detail: string; phase?: string };
+  // Escalation payload (task.escalate)
+  escalation?: { reason: string; severity: "warn" | "block" | "critical"; suggestion?: string };
+  // Heartbeat payload (task.heartbeat)
+  heartbeat?: { taskId: string; status: string };
 }
 
 function feedPath(cwd: string): string {
@@ -117,6 +127,9 @@ const CREW_EVENT_TYPES = new Set<FeedEventType>([
   "task.split",
   "task.revise",
   "task.revise-tree",
+  "task.progress",
+  "task.escalate",
+  "task.heartbeat",
   "plan.start",
   "plan.pass.start",
   "plan.pass.done",
@@ -126,6 +139,7 @@ const CREW_EVENT_TYPES = new Set<FeedEventType>([
   "plan.cancel",
   "plan.failed",
   "health",
+  "heartbeat.stale",
   "smoke.start",
   "smoke.pass",
   "smoke.fail",
@@ -175,6 +189,27 @@ export function formatFeedLine(event: FeedEvent): string {
     case "task.split": line += withPreview(` split ${event.target ?? ""}`); break;
     case "task.revise": line += withPreview(` revised ${event.target ?? ""}`); break;
     case "task.revise-tree": line += withPreview(` revised ${event.target ?? ""} + dependents`); break;
+    case "task.progress": {
+      const pct = event.progress ? ` ${event.progress.percentage}%` : "";
+      const phase = event.progress?.phase ? ` [${event.progress.phase}]` : "";
+      const detail = event.progress?.detail ?? preview;
+      line += withPreview(` progress${pct}${phase} on ${event.target ?? ""}`);
+      if (!preview && detail) line += ` — ${detail}`;
+      break;
+    }
+    case "task.escalate": {
+      const sev = event.escalation?.severity ?? "warn";
+      const reason = event.escalation?.reason ?? preview;
+      line += ` 🚨 escalated ${event.target ?? ""} [${sev}]`;
+      if (reason) line += ` — ${reason}`;
+      break;
+    }
+    case "task.heartbeat": {
+      const status = event.heartbeat?.status ?? "active";
+      line += ` 💓 heartbeat ${event.target ?? ""} [${status}]`;
+      break;
+    }
+    case "heartbeat.stale": line += withPreview(` ⚠️ heartbeat stale: ${event.target ?? ""}`); break;
     case "plan.start": line += withPreview(" planning started"); break;
     case "plan.pass.start": line += withPreview(" planning pass started"); break;
     case "plan.pass.done": line += withPreview(" planning pass finished"); break;

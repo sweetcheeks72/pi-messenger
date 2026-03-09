@@ -1,7 +1,7 @@
 ---
 name: crew-worker
 description: Implements a single crew task with mesh coordination
-tools: read, write, edit, bash, pi_messenger
+tools: read, write, edit, bash, pi_messenger, interview
 model: openai-codex/gpt-5.3-codex, anthropic/claude-opus-4-6, google/gemini-3.1-pro-preview
 crewRole: worker
 maxOutput: { bytes: 204800, lines: 5000 }
@@ -46,6 +46,13 @@ Identify files you'll modify and reserve them:
 ```typescript
 pi_messenger({ action: "reserve", paths: ["src/path/to/files/"], reason: "<TASK_ID>" })
 ```
+
+## User Clarification
+
+If your task spec leaves major gaps in user intent, missing acceptance criteria, or unstated tradeoffs (e.g. speed vs safety, specific library choices):
+1. Use the `interview` tool to present a structured clarification form to the user.
+2. After the interview completes, log the clarification result using `pi_messenger({ action: "task.progress", id: "<TASK_ID>", message: "Clarified scope: <result>" })`.
+3. If the user's responses don't resolve the ambiguity or introduce a blocker, use `pi_messenger({ action: "task.block", id: "<TASK_ID>", reason: "..." })`.
 
 ## Phase 4: Implement
 

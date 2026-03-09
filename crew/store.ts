@@ -448,6 +448,7 @@ export function completeTask(
     status: "pending_review",
     summary,
     evidence,
+    head_commit: getBaseCommit(cwd),
   });
 }
 
@@ -531,6 +532,7 @@ export function resetTask(cwd: string, taskId: string, cascade: boolean = false)
     started_at: undefined,
     completed_at: undefined,
     base_commit: undefined,
+    head_commit: undefined,
     assigned_to: undefined,
     summary: undefined,
     evidence: undefined,

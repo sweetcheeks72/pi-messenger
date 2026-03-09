@@ -1,7 +1,7 @@
 ---
 name: crew-planner
 description: Analyzes codebase and PRD to create a comprehensive task breakdown
-tools: read, bash, web_search, pi_messenger
+tools: read, bash, web_search, pi_messenger, interview
 model: anthropic/claude-opus-4-6
 crewRole: planner
 maxOutput: { bytes: 204800, lines: 5000 }
@@ -59,6 +59,10 @@ Synthesize everything you've found. Identify:
 - **Security concerns**: Input validation, auth, data exposure
 - **Testing requirements**: What types of tests are needed, what should be covered
 - **INDIRECTION RISK**: For each task, flag if the bug/feature touches code that is NOT directly invoked by tests — configuration classes, initialization routines, factory methods, type registrations. These are where root causes hide while crash sites get the blame. (Ref: Mockito_8 — root cause in `registerTypeVariablesOn()` line 80, crash at `getActualTypeArgumentFor()` line 185.)
+
+## User Clarification (Scope Gaps)
+
+If the PRD or prompt leaves major scope gaps, missing acceptance criteria, or unstated tradeoffs, do not guess. Use the `interview` tool to present a structured clarification form to the user before finalizing the task graph. Once the user provides clarification, incorporate those decisions into your final tasks.
 
 ## Phase 6: Task Breakdown
 

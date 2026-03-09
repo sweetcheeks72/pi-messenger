@@ -13,7 +13,7 @@ import type { CrewParams, Task, TaskEvidence } from "../types.js";
 import { result } from "../utils/result.js";
 import { loadCrewConfig } from "../utils/config.js";
 import * as store from "../store.js";
-import { logFeedEvent } from "../../feed.js";
+import { logFeedEvent, appendFeedEvent } from "../../feed.js";
 import { executeTaskAction } from "../task-actions.js";
 import { taskRevise, taskReviseTree } from "./revise.js";
 export { executeRevise, executeReviseTree, type ReviseResult } from "./revise.js";
@@ -62,6 +62,10 @@ export async function execute(
       return taskReset(cwd, params, state, crewNamespace);
     case "progress":
       return taskProgress(cwd, params, state, crewNamespace);
+    case "escalate":
+      return taskEscalate(cwd, params, state, crewNamespace);
+    case "heartbeat":
+      return taskHeartbeat(cwd, params, state, crewNamespace);
     case "revise":
       return taskRevise(cwd, params, state);
     case "revise-tree":
@@ -341,15 +345,112 @@ ${statusIcon} **Status:** ${task.status}${statusDetails}
 }
 
 function taskProgress(cwd: string, params: CrewParams, state: MessengerState, namespace: string) {
-  const { id, message } = params;
+  const { id, percentage, detail, phase, message } = params;
   if (!id) return result("Error: id required for task.progress", { mode: "task.progress", error: "missing_id" });
-  if (!message) return result("Error: message required for task.progress", { mode: "task.progress", error: "missing_message" });
+
+  // Structured progress (new API)
+  if (percentage !== undefined || detail !== undefined) {
+    if (percentage === undefined || detail === undefined) {
+      return result("Error: both percentage and detail required for structured task.progress", {
+        mode: "task.progress", error: "missing_fields"
+      });
+    }
+    if (percentage < 0 || percentage > 100) {
+      return result("Error: percentage must be between 0 and 100", {
+        mode: "task.progress", error: "invalid_percentage"
+      });
+    }
+
+    const task = store.getTask(cwd, id, namespace);
+    if (!task) return result(`Error: Task ${id} not found`, { mode: "task.progress", error: "not_found", id });
+
+    appendFeedEvent(cwd, {
+      ts: new Date().toISOString(),
+      agent: state.agentName || "unknown",
+      type: "task.progress",
+      target: id,
+      preview: `${percentage}% — ${detail}`,
+      progress: { percentage, detail, phase },
+    });
+
+    const phaseStr = phase ? ` [${phase}]` : "";
+    return result(`Progress updated for ${id}: ${percentage}%${phaseStr} — ${detail}`, {
+      mode: "task.progress",
+      id,
+      percentage,
+      detail,
+      phase,
+    });
+  }
+
+  // Legacy text-based progress (backward compatibility)
+  if (!message) return result("Error: message (or percentage+detail) required for task.progress", {
+    mode: "task.progress", error: "missing_message"
+  });
 
   const task = store.getTask(cwd, id, namespace);
   if (!task) return result(`Error: Task ${id} not found`, { mode: "task.progress", error: "not_found", id });
 
   store.appendTaskProgress(cwd, id, state.agentName || "unknown", message);
   return result(`Progress logged for ${id}`, { mode: "task.progress", id });
+}
+
+// =============================================================================
+// task.escalate
+// =============================================================================
+
+function taskEscalate(cwd: string, params: CrewParams, state: MessengerState, namespace: string) {
+  const { id, reason, severity, suggestion } = params;
+  if (!id) return result("Error: id required for task.escalate", { mode: "task.escalate", error: "missing_id" });
+  if (!reason) return result("Error: reason required for task.escalate", { mode: "task.escalate", error: "missing_reason" });
+  if (!severity) return result("Error: severity required for task.escalate (warn|block|critical)", { mode: "task.escalate", error: "missing_severity" });
+  if (severity !== "warn" && severity !== "block" && severity !== "critical") {
+    return result("Error: severity must be 'warn', 'block', or 'critical'", { mode: "task.escalate", error: "invalid_severity" });
+  }
+
+  const task = store.getTask(cwd, id, namespace);
+  if (!task) return result(`Error: Task ${id} not found`, { mode: "task.escalate", error: "not_found", id });
+
+  appendFeedEvent(cwd, {
+    ts: new Date().toISOString(),
+    agent: state.agentName || "unknown",
+    type: "task.escalate",
+    target: id,
+    preview: `[${severity}] ${reason}`,
+    escalation: { reason, severity, suggestion },
+  });
+
+  const suggestionStr = suggestion ? `\n**Suggestion:** ${suggestion}` : "";
+  return result(`🚨 Escalated ${id} [${severity}]: ${reason}${suggestionStr}`, {
+    mode: "task.escalate",
+    id,
+    severity,
+    reason,
+    suggestion,
+  });
+}
+
+// =============================================================================
+// task.heartbeat
+// =============================================================================
+
+function taskHeartbeat(cwd: string, params: CrewParams, state: MessengerState, _namespace: string) {
+  const { id } = params;
+  if (!id) return result("Error: id required for task.heartbeat", { mode: "task.heartbeat", error: "missing_id" });
+
+  appendFeedEvent(cwd, {
+    ts: new Date().toISOString(),
+    agent: state.agentName || "unknown",
+    type: "task.heartbeat",
+    target: id,
+    heartbeat: { taskId: id, status: "active" },
+  });
+
+  return result(`💓 Heartbeat emitted for ${id}`, {
+    mode: "task.heartbeat",
+    id,
+    ts: new Date().toISOString(),
+  });
 }
 
 // =============================================================================
@@ -425,6 +526,9 @@ function taskStart(cwd: string, params: CrewParams, state: MessengerState, names
     : "";
 
   const text = `🔄 Started task **${id}**
+
+*Note: task.start claims/starts the task for the current agent. It does NOT spawn a background worker by itself.*
+*If you want actual worker execution, use \`pi_messenger({ action: "work" })\`, run autonomous work, or otherwise dispatch a worker explicitly.*
 
 **Title:** ${started.title}
 **Assigned to:** ${agentName}

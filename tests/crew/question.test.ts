@@ -53,6 +53,50 @@ describe("crew/question handler", () => {
       expect(questions[0].answer).toBeNull();
     });
 
+    it("delivers question to target agent's inbox", async () => {
+      const response = await questionHandler.execute(
+        "ask",
+        {
+          to: "AgentB",
+          question: "Which database to use?",
+        },
+        createState("AgentA"),
+        createMockContext(cwd),
+      );
+
+      const questionId = response.details.questionId as string;
+      const inboxDir = path.join(cwd, ".pi", "messenger", "inbox", "AgentB");
+      expect(fs.existsSync(inboxDir)).toBe(true);
+
+      const inboxFiles = fs.readdirSync(inboxDir).filter(f => f.endsWith(".json"));
+      expect(inboxFiles.length).toBe(1);
+
+      const msg = JSON.parse(fs.readFileSync(path.join(inboxDir, inboxFiles[0]), "utf-8"));
+      expect(msg.from).toBe("AgentA");
+      expect(msg.to).toBe("AgentB");
+      expect(msg.type).toBe("question");
+      expect(msg.questionId).toBe(questionId);
+    });
+
+    it("appends question to task progress log when id provided", async () => {
+      const task = store.createTask(cwd, "My Task", "Do stuff");
+
+      await questionHandler.execute(
+        "ask",
+        {
+          to: "AgentB",
+          question: "What format?",
+          id: task.id,
+        },
+        createState("AgentA"),
+        createMockContext(cwd),
+      );
+
+      const progress = store.getTaskProgress(cwd, task.id);
+      expect(progress).not.toBeNull();
+      expect(progress).toContain("Question asked to AgentB: What format?");
+    });
+
     it("requires 'to' parameter", async () => {
       const response = await questionHandler.execute(
         "ask",
@@ -104,6 +148,31 @@ describe("crew/question handler", () => {
       const answered = questions.find((q: any) => q.id === questionId);
       expect(answered.status).toBe("answered");
       expect(answered.answer).toBe("Use JSON");
+    });
+
+    it("appends answer to task progress log when question has taskId", async () => {
+      const task = store.createTask(cwd, "My Task", "Do stuff");
+
+      // Ask with a taskId
+      const askResponse = await questionHandler.execute(
+        "ask",
+        { to: "AgentB", question: "What format?", id: task.id },
+        createState("AgentA"),
+        createMockContext(cwd),
+      );
+      const questionId = askResponse.details.questionId as string;
+
+      // Answer it
+      await questionHandler.execute(
+        "answer",
+        { questionId, answer: "Use JSON" },
+        createState("AgentB"),
+        createMockContext(cwd),
+      );
+
+      const progress = store.getTaskProgress(cwd, task.id);
+      expect(progress).not.toBeNull();
+      expect(progress).toContain("Answer from AgentB: Use JSON");
     });
 
     it("returns error for non-existent question", async () => {

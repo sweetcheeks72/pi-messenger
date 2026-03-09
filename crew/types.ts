@@ -59,6 +59,7 @@ export interface Task {
   started_at?: string;           // When task.start was called
   completed_at?: string;         // When task.done was called
   base_commit?: string;          // Git commit SHA at task.start
+  head_commit?: string;          // Git commit SHA when task completed (set by completeTask)
   assigned_to?: string;          // Agent name currently working on it
   model_identity?: string;      // Stable provider/model or config fingerprint for metrics
   model_identity_dual?: string[]; // Dual-worker identity set for critical tasks
@@ -144,6 +145,15 @@ export interface CrewParams {
   // Task reset
   cascade?: boolean;
   force?: boolean;
+
+  // Structured progress (task.progress)
+  percentage?: number;
+  detail?: string;
+  phase?: string;
+
+  // Escalation (task.escalate)
+  severity?: "warn" | "block" | "critical";
+  suggestion?: string;
 
   // Critical task dual-verification
   critical?: boolean;

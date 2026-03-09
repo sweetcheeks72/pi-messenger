@@ -373,7 +373,12 @@ Usage (action-based API - preferred):
   pi_messenger({ action: "task.reset", id: "task-1" })          → Reset task
   
   // Crew: Review
-  pi_messenger({ action: "review", target: "task-1" })          → Review impl`,
+  pi_messenger({ action: "review", target: "task-1" })          → Review impl
+  
+  // Crew: Structured Progress Events
+  pi_messenger({ action: "task.progress", id: "task-1", percentage: 50, detail: "Halfway done" })
+  pi_messenger({ action: "task.escalate", id: "task-1", reason: "Blocked on API", severity: "block" })
+  pi_messenger({ action: "task.heartbeat", id: "task-1" })       → Emit heartbeat`,
     parameters: Type.Object({
       action: Type.Optional(Type.String({
         description: "Action to perform (e.g., 'join', 'plan', 'work', 'task.start')"
@@ -429,7 +434,16 @@ Usage (action-based API - preferred):
       message: Type.Optional(Type.String({ description: "Message to send" })),
       replyTo: Type.Optional(Type.String({ description: "Message ID if this is a reply" })),
       reason: Type.Optional(Type.String({ description: "Reason for reservation, claim, or task block" })),
-      autoRegisterPath: Type.Optional(StringEnum(["add", "remove", "list"], { description: "Manage auto-register paths: add/remove current folder, or list all" }))
+      autoRegisterPath: Type.Optional(StringEnum(["add", "remove", "list"], { description: "Manage auto-register paths: add/remove current folder, or list all" })),
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // STRUCTURED PROGRESS EVENT PARAMETERS
+      // ═══════════════════════════════════════════════════════════════════════
+      percentage: Type.Optional(Type.Number({ description: "Progress percentage 0-100 (for task.progress)" })),
+      detail: Type.Optional(Type.String({ description: "Progress detail description (for task.progress)" })),
+      phase: Type.Optional(Type.String({ description: "Current phase label, e.g. 'implementation' (for task.progress)" })),
+      severity: Type.Optional(StringEnum(["warn", "block", "critical"], { description: "Escalation severity (for task.escalate)" })),
+      suggestion: Type.Optional(Type.String({ description: "Optional remediation suggestion (for task.escalate)" }))
     }),
 
     async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {

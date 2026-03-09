@@ -172,6 +172,32 @@ describe("crew/store", () => {
       expect(plan?.completed_count).toBe(0);
     });
 
+    it("completeTask: writes head_commit to task data", () => {
+      store.createPlan(cwd, "docs/PRD.md");
+      const task = store.createTask(cwd, "Task one", "Desc one");
+      store.startTask(cwd, task.id, "WorkerAlpha");
+
+      const completed = store.completeTask(cwd, task.id, "Done", { commits: ["abc"] });
+
+      expect(completed).not.toBeNull();
+      // head_commit key should exist in the returned task object
+      // (value may be undefined if not in a git repo, but the field is written)
+      expect("head_commit" in (completed ?? {})).toBe(true);
+    });
+
+    it("resetTask: clears head_commit", () => {
+      store.createPlan(cwd, "docs/PRD.md");
+      const task = store.createTask(cwd, "Task one", "Desc one");
+      store.startTask(cwd, task.id, "WorkerAlpha");
+      store.completeTask(cwd, task.id, "Done");
+
+      const reset = store.resetTask(cwd, task.id);
+      expect(reset.length).toBe(1);
+      expect(reset[0].status).toBe("todo");
+      // head_commit should be cleared on reset
+      expect(reset[0].head_commit).toBeUndefined();
+    });
+
     it("acceptTask marks task done and increments completed_count", () => {
       store.createPlan(cwd, "docs/PRD.md");
       const task = store.createTask(cwd, "Task one", "Desc one");

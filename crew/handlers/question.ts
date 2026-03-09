@@ -25,6 +25,7 @@ export interface QuestionEntry {
   to: string;
   question: string;
   context: string | null;
+  taskId: string | null;         // Task ID of the asking agent (for progress logging)
   timestamp: string;
   status: "pending" | "answered" | "timeout";
   answer: string | null;
@@ -122,6 +123,7 @@ function questionAsk(cwd: string, params: CrewParams, state: MessengerState) {
   const to = params.to;
   const question = params.question;
   const context = params.context ?? null;
+  const taskId = params.id ?? null;
 
   if (!to) {
     return result("Error: 'to' required for ask action.", {
@@ -138,12 +140,14 @@ function questionAsk(cwd: string, params: CrewParams, state: MessengerState) {
   }
 
   const id = `q-${crypto.randomUUID().slice(0, 8)}`;
+  const toAgent = typeof to === "string" ? to : to[0];
   const entry: QuestionEntry = {
     id,
     from,
-    to: typeof to === "string" ? to : to[0],
+    to: toAgent,
     question,
     context,
+    taskId,
     timestamp: new Date().toISOString(),
     status: "pending",
     answer: null,
@@ -154,6 +158,29 @@ function questionAsk(cwd: string, params: CrewParams, state: MessengerState) {
   saveQuestions(cwd, questions);
 
   logFeedEvent(cwd, from, "question.ask", id, `→ ${entry.to}: ${question}`);
+
+  // Deliver to target agent's inbox
+  const inboxDir = path.join(cwd, ".pi", "messenger", "inbox", toAgent);
+  fs.mkdirSync(inboxDir, { recursive: true });
+  const random = Math.random().toString(36).substring(2, 8);
+  const msgFile = path.join(inboxDir, `${Date.now()}-${random}.json`);
+  const inboxMsg = {
+    id: `${id}-inbox`,
+    from,
+    to: toAgent,
+    text: `Question from ${from}: ${question}${context ? `\nContext: ${context}` : ""}`,
+    timestamp: new Date().toISOString(),
+    replyTo: null,
+    type: "question",
+    questionId: id,
+    taskId,
+  };
+  fs.writeFileSync(msgFile, JSON.stringify(inboxMsg, null, 2));
+
+  // Append to asking task's progress log (if taskId known)
+  if (taskId) {
+    store.appendTaskProgress(cwd, taskId, "system", `Question asked to ${toAgent}: ${question}`);
+  }
 
   return result(
     `Question sent to **${entry.to}**:\n> ${question}\n\nQuestion ID: \`${id}\``,
@@ -204,6 +231,13 @@ function questionAnswer(cwd: string, params: CrewParams, state: MessengerState) 
   saveQuestions(cwd, questions);
 
   logFeedEvent(cwd, from, "question.answer", questionId, answer);
+
+  // Append answer to asking task's progress log (if taskId known)
+  // TODO: timeout semantics not yet implemented — questions wait indefinitely.
+  // Workaround: worker can check pi_messenger({ action: "feed", filter: "question.answer" })
+  if (entry.taskId) {
+    store.appendTaskProgress(cwd, entry.taskId, "system", `Answer from ${from}: ${answer}`);
+  }
 
   return result(
     `Answered question \`${questionId}\` from **${entry.from}**:\n> ${entry.question}\n\n**Answer:** ${answer}`,
