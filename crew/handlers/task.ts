@@ -17,6 +17,7 @@ import { logFeedEvent, appendFeedEvent } from "../../feed.js";
 import { executeTaskAction } from "../task-actions.js";
 import { taskRevise, taskReviseTree } from "./revise.js";
 import { heartbeatTimestamps } from "../../lib.js";
+import { emitHeartbeat } from "../heartbeat.js";
 export { executeRevise, executeReviseTree, type ReviseResult } from "./revise.js";
 
 type NamespaceParams = CrewParams & { crew?: string; crewNamespace?: string; namespace?: string; };
@@ -376,6 +377,7 @@ function taskProgress(cwd: string, params: CrewParams, state: MessengerState, na
 
     const phaseStr = phase ? ` [${phase}]` : "";
     store.appendTaskProgress(cwd, id, state.agentName || "unknown", `${percentage}%${phaseStr} — ${detail}`);
+    store.updateTask(cwd, id, { progressPct: percentage });
     return result(`Progress updated for ${id}: ${percentage}%${phaseStr} — ${detail}`, {
       mode: "task.progress",
       id,
@@ -427,6 +429,19 @@ function taskEscalate(cwd: string, params: CrewParams, state: MessengerState, na
 
   if (severity === "block" || severity === "critical") {
     store.blockTask(cwd, id, reason);
+
+    // Deliver escalation to Helios inbox so orchestrator sees it immediately
+    const inboxDir = path.join(cwd, ".pi", "messenger", "inbox", "helios");
+    fs.mkdirSync(inboxDir, { recursive: true });
+    const inboxFile = path.join(inboxDir, `${Date.now()}-escalate-${id}.json`);
+    fs.writeFileSync(inboxFile, JSON.stringify({
+      type: "task.escalate",
+      taskId: id,
+      reason,
+      severity,
+      suggestion,
+      timestamp: new Date().toISOString(),
+    }));
   }
 
   const suggestionStr = suggestion ? `\n**Suggestion:** ${suggestion}` : "";
@@ -451,6 +466,10 @@ function taskHeartbeat(cwd: string, params: CrewParams, state: MessengerState, _
 
   // Update the in-memory heartbeat map so checkStaleHeartbeats() sees API-triggered heartbeats
   heartbeatTimestamps.set(id, ts);
+
+  // Also write the file-based heartbeat so getStaleAgents() sees API-triggered heartbeats
+  const agentName = state.agentName || "unknown";
+  emitHeartbeat(cwd, { agentName, taskId: id, timestamp: ts });
 
   appendFeedEvent(cwd, {
     ts,

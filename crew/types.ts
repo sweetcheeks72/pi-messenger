@@ -83,6 +83,9 @@ export interface Task {
   last_review?: ReviewFeedback;  // Feedback from last review (for retry)
   rollback_reason?: string;      // Reason task was rolled back and re-queued
 
+  /** Persisted progress percentage from the most recent task.progress structured call */
+  progressPct?: number;
+
   /** When true, task gets dual-worker verification: two independent workers, outputs compared */
   critical?: boolean;
 }
