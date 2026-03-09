@@ -401,7 +401,7 @@ function spawnCriticalJudge(
   cwd: string,
   config: ReturnType<typeof loadCrewConfig>,
   dirs: Dirs,
-): void {
+): Promise<"ACCEPT_A" | "ACCEPT_B" | "REJECT_BOTH"> {
   const judgePrompt = [
     `## Critical Path Adjudication: ${taskId}`,
     ``,
@@ -435,7 +435,7 @@ function spawnCriticalJudge(
     `Adjudicating divergent outputs for critical task ${taskTitle}`);
 
   const judgeModel = resolveModel(config.models?.reviewer);
-  spawnAgents(
+  return spawnAgents(
     [{
       agent: "adversarial-reviewer",
       task: judgePrompt,
@@ -446,7 +446,7 @@ function spawnCriticalJudge(
     { messengerDirs: { registry: dirs.registry, inbox: dirs.inbox } },
   ).then((results) => {
     const judgeResult = results[0];
-    if (!judgeResult) return;
+    if (!judgeResult) return "REJECT_BOTH" as const;
     const output = judgeResult.output ?? "";
     const verdict = /ACCEPT_A/i.test(output) ? "ACCEPT_A"
       : /ACCEPT_B/i.test(output) ? "ACCEPT_B"
@@ -470,9 +470,12 @@ function spawnCriticalJudge(
         },
       });
     }
+
+    return verdict;
   }).catch((err) => {
     store.appendTaskProgress(cwd, taskId, "system",
       `Critical judge failed: ${err instanceof Error ? err.message : String(err)}`);
+    return "REJECT_BOTH" as const;
   });
 }
 
@@ -488,6 +491,7 @@ async function spawnDualWorkers(
   dirs: Dirs,
   crewNamespace: string,
   params: CrewParams,
+  primaryAgentName: string,
   otherTasks: import("../types.js").Task[],
 ): Promise<{ results: AgentResult[]; workerNames: [string, string] }> {
   const workerNameA = `${generateMemorableName()}-A`;
@@ -512,7 +516,7 @@ async function spawnDualWorkers(
   const taskIdNs = namespacedTaskId(task.id, crewNamespace);
   const workerTasks = [
     {
-      agent: agentName,
+      agent: primaryAgentName,
       task: prompt,
       taskId: `${taskIdNs}-A`,
       modelOverride,
@@ -720,21 +724,29 @@ export async function execute(
     return freshTask?.critical !== true;
   });
 
+  type CriticalTaskOutcome = {
+    taskId: string;
+    hadRuntimeFailure: boolean;
+    wasGracefullyShutdown: boolean;
+  };
+
   // Spawn dual workers for critical tasks (async, processed after normal workers)
-  const criticalPromises: Promise<void>[] = [];
+  const criticalPromises: Promise<CriticalTaskOutcome>[] = [];
   for (const assignment of criticalAssignments) {
-    const { task: assignedTask } = assignment;
+    const { task: assignedTask, agentName } = assignment;
     const freshTask = store.getTask(cwd, assignedTask.id);
     if (!freshTask) continue;
 
     const others = pendingAssignments.map(a => a.task).filter(o => o.id !== assignedTask.id);
     const promise = spawnDualWorkers(
-      freshTask, prdLabel, cwd, config, dirs, crewNamespace, params, others,
+      freshTask, prdLabel, cwd, config, dirs, crewNamespace, params, agentName, others,
     ).then(({ results: dualResults, workerNames }) => {
       const [resultA, resultB] = dualResults;
       const outputA = resultA?.output ?? "";
       const outputB = resultB?.output ?? "";
       const bothSucceeded = resultA?.exitCode === 0 && resultB?.exitCode === 0;
+      const hadRuntimeFailure = !bothSucceeded;
+      const wasGracefullyShutdown = Boolean(resultA?.wasGracefullyShutdown || resultB?.wasGracefullyShutdown);
 
       if (bothSucceeded) {
         const comparison = compareCriticalOutputs(outputA, outputB);
@@ -749,16 +761,24 @@ export async function execute(
           // Divergent — spawn judge
           logFeedEvent(cwd, "crew", "message", assignedTask.id,
             `Critical dual-verification: DIVERGENT — spawning judge`);
-          spawnCriticalJudge(assignedTask.id, assignedTask.title, outputA, outputB, cwd, config, dirs);
+          return spawnCriticalJudge(assignedTask.id, assignedTask.title, outputA, outputB, cwd, config, dirs)
+            .then(() => ({ taskId: assignedTask.id, hadRuntimeFailure, wasGracefullyShutdown }));
         }
       } else {
         // One or both failed — log and let normal failure handling apply
         store.appendTaskProgress(cwd, assignedTask.id, "system",
           `Critical dual-worker: not both succeeded (A=${resultA?.exitCode}, B=${resultB?.exitCode})`);
       }
+
+      return { taskId: assignedTask.id, hadRuntimeFailure, wasGracefullyShutdown };
     }).catch((err) => {
       store.appendTaskProgress(cwd, assignedTask.id, "system",
         `Critical dual-worker spawn failed: ${err instanceof Error ? err.message : String(err)}`);
+      return {
+        taskId: assignedTask.id,
+        hadRuntimeFailure: true,
+        wasGracefullyShutdown: false,
+      };
     });
     criticalPromises.push(promise);
   }
@@ -785,7 +805,7 @@ export async function execute(
   attemptedTaskIds.push(...criticalTaskIds);
 
   // Await critical dual-worker tasks in parallel with normal workers
-  const [workerResults] = await Promise.all([
+  const [workerResults, criticalOutcomes] = await Promise.all([
     workerTasks.length > 0
     ? spawnAgents(
         workerTasks,
@@ -796,7 +816,7 @@ export async function execute(
         }
       )
     : Promise.resolve([] as AgentResult[]),
-    ...criticalPromises,
+    Promise.all(criticalPromises),
   ]);
 
   // Process results
@@ -886,6 +906,29 @@ export async function execute(
         }
         failed.push(taskId);
       }
+    }
+  }
+
+  // Fold critical-task outcomes into wave accounting/state transitions
+  for (const outcome of criticalOutcomes) {
+    const taskId = outcome.taskId;
+    const task = store.getTask(cwd, taskId);
+
+    if (task?.status === "done") {
+      succeeded.push(taskId);
+    } else if (task?.status === "blocked") {
+      blocked.push(taskId);
+    } else if (task?.status === "in_progress") {
+      const interruptionMessage = outcome.wasGracefullyShutdown
+        ? "Critical task interrupted (shutdown), reset to todo"
+        : outcome.hadRuntimeFailure
+          ? "Critical dual-worker failed before completion, reset to todo"
+          : "Critical task exited without final completion, reset to todo";
+      store.appendTaskProgress(cwd, taskId, "system", interruptionMessage);
+      store.updateTask(cwd, taskId, { status: "todo", assigned_to: undefined });
+      failed.push(taskId);
+    } else {
+      failed.push(taskId);
     }
   }
 
