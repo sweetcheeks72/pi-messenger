@@ -34,6 +34,7 @@ vi.mock("node:child_process", () => ({
 }));
 
 const mockGetTasks = vi.fn(() => []);
+const mockTriggerRollback = vi.fn();
 
 vi.mock("../../crew/store.js", () => ({
   getPlan: vi.fn(() => ({ prd: "docs/PRD.md" })),
@@ -48,6 +49,10 @@ vi.mock("../../crew/store.js", () => ({
 
 vi.mock("../../feed.js", () => ({
   logFeedEvent: vi.fn(),
+}));
+
+vi.mock("../../crew/handlers/work.js", () => ({
+  triggerRollback: (...args: any[]) => mockTriggerRollback(...args),
 }));
 
 vi.mock("../../crew/utils/config.js", () => ({
@@ -204,4 +209,62 @@ describe("smoke test functions", () => {
       expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
     });
   });
+
+  describe("parseSmokeRollbackSignal", () => {
+    it("extracts task + reason when smoke report is BROKEN", () => {
+      const output = `smoke_test_report:
+  status: BROKEN
+  breakage_trace:
+    responsible_task: "task-2"
+🔴 REPO BROKEN: Type check failed in crew/handlers/work.ts`;
+
+      expect(lobby.parseSmokeRollbackSignal(output)).toEqual({
+        taskId: "task-2",
+        reason: expect.stringContaining("Responsible task: task-2"),
+      });
+    });
+
+    it("returns null for healthy smoke output", () => {
+      const output = `smoke_test_report:
+  status: HEALTHY
+✅ REPO HEALTHY: All checks passed`;
+      expect(lobby.parseSmokeRollbackSignal(output)).toBeNull();
+    });
+  });
+
+  describe("rollback wiring", () => {
+    it("triggers rollback when smoke tester reports BROKEN + responsible_task", async () => {
+      mockExistsSync = () => true;
+      lobby.startSmokeTest("/tmp/test-repo");
+
+      const proc = mockSpawn.mock.results[0]?.value;
+      expect(proc).toBeDefined();
+
+      const brokenReport = {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{
+            type: "text",
+            text: `smoke_test_report:
+  status: BROKEN
+  breakage_trace:
+    responsible_task: task-2
+🔴 REPO BROKEN: compilation failed`,
+          }],
+        },
+      };
+
+      proc.stdout.on.mock.calls.find((c: any[]) => c[0] === "data")?.[1](Buffer.from(JSON.stringify(brokenReport) + "\n"));
+      await proc._handlers.close(0);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(mockTriggerRollback).toHaveBeenCalledWith(
+        "/tmp/test-repo",
+        "task-2",
+        expect.stringContaining("Smoke test BROKEN"),
+      );
+    });
+  });
 });
+

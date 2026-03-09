@@ -558,6 +558,44 @@ import type { ChildProcess } from "node:child_process";
 let smokeTestProc: ChildProcess | null = null;
 let smokeTestTimer: ReturnType<typeof setInterval> | null = null;
 
+function extractAssistantTextFromJsonl(jsonl: string): string {
+  let text = "";
+  for (const line of jsonl.split("\n")) {
+    const event = parseJsonlLine(line);
+    if (!event || event.type !== "message_end" || event.message?.role !== "assistant") continue;
+    for (const part of event.message.content ?? []) {
+      if (part.type === "text" && part.text) {
+        text += part.text + "\n";
+      }
+    }
+  }
+  return text;
+}
+
+export interface SmokeRollbackSignal {
+  taskId: string;
+  reason: string;
+}
+
+export function parseSmokeRollbackSignal(output: string): SmokeRollbackSignal | null {
+  if (!/\bstatus:\s*BROKEN\b/i.test(output) && !/\bREPO\s+BROKEN\b/i.test(output)) {
+    return null;
+  }
+
+  const taskMatch = output.match(/responsible_task:\s*["']?((?:task|TASK)-\d+)["']?/i);
+  if (!taskMatch) return null;
+  const taskId = taskMatch[1].toLowerCase();
+
+  const statusLine = output.match(/🔴\s*REPO\s+BROKEN:\s*([^\n]+)/i)?.[1]?.trim();
+  const failingTest = output.match(/failing_tests:[\s\S]*?\n\s*-\s*["']?([^"'\n]+)["']?/i)?.[1]?.trim();
+  const reasonDetail = statusLine ?? (failingTest ? `Failing check: ${failingTest}` : "Smoke test reported repository breakage");
+
+  return {
+    taskId,
+    reason: `Smoke test BROKEN. Responsible task: ${taskId}. ${reasonDetail}`,
+  };
+}
+
 /**
  * Determine whether a background smoke test should run.
  * Returns true when 3+ tasks (configurable via minActiveTasks) are currently in_progress.
@@ -619,14 +657,45 @@ export function startSmokeTest(cwd: string): void {
 
   logFeedEvent(cwd, "smoke-tester", "smoke.start", undefined, "Background smoke test started");
 
+  let stdoutBuffer = "";
+  let stderrBuffer = "";
+  smokeTestProc.stdout?.on("data", (data) => {
+    stdoutBuffer += data.toString();
+  });
+  smokeTestProc.stderr?.on("data", (data) => {
+    stderrBuffer += data.toString();
+  });
+
   smokeTestProc.on("close", (exitCode) => {
+    const assistantOutput = extractAssistantTextFromJsonl(stdoutBuffer);
+    const rollbackSignal = parseSmokeRollbackSignal(`${assistantOutput}
+${stdoutBuffer}
+${stderrBuffer}`);
+    const smokeType = rollbackSignal
+      ? "smoke.fail"
+      : exitCode === 0 ? "smoke.pass" : "smoke.fail";
+
     logFeedEvent(
       cwd,
       "smoke-tester",
-      exitCode === 0 ? "smoke.pass" : "smoke.fail",
-      undefined,
-      `Smoke test exited (code ${exitCode ?? "unknown"})`,
+      smokeType,
+      rollbackSignal?.taskId,
+      rollbackSignal
+        ? `BROKEN ${rollbackSignal.taskId}: ${rollbackSignal.reason}`
+        : `Smoke test exited (code ${exitCode ?? "unknown"})`,
     );
+
+    if (rollbackSignal) {
+      void import("./handlers/work.js")
+        .then(({ triggerRollback }) => {
+          triggerRollback(cwd, rollbackSignal.taskId, rollbackSignal.reason);
+        })
+        .catch((err) => {
+          logFeedEvent(cwd, "smoke-tester", "smoke.error", rollbackSignal.taskId,
+            `Failed to trigger rollback: ${err instanceof Error ? err.message : String(err)}`);
+        });
+    }
+
     smokeTestProc = null;
   });
 

@@ -336,6 +336,7 @@ export function triggerRollback(cwd: string, taskId: string, reason: string): vo
       store.updateTask(cwd, taskId, {
         status: "todo",
         assigned_to: undefined,
+        blocked_reason: undefined,
         rollback_reason: reason,
       });
       store.appendTaskProgress(cwd, taskId, "system",
