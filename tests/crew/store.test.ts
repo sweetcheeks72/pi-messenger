@@ -183,6 +183,13 @@ describe("crew/store", () => {
       // head_commit key should exist in the returned task object
       // (value may be undefined if not in a git repo, but the field is written)
       expect("head_commit" in (completed ?? {})).toBe(true);
+
+      // Disk round-trip: verify head_commit is persisted in the JSON file
+      // (value may be undefined in non-git environments — JSON strips undefined keys,
+      // so we compare the value directly rather than checking key presence)
+      const persisted = store.getTask(cwd, task.id);
+      expect(persisted).not.toBeNull();
+      expect(persisted?.head_commit).toBe(completed?.head_commit);
     });
 
     it("resetTask: clears head_commit", () => {
@@ -196,6 +203,11 @@ describe("crew/store", () => {
       expect(reset[0].status).toBe("todo");
       // head_commit should be cleared on reset
       expect(reset[0].head_commit).toBeUndefined();
+
+      // Disk round-trip: verify head_commit is absent in the persisted JSON file
+      const persisted = store.getTask(cwd, task.id);
+      expect(persisted).not.toBeNull();
+      expect(persisted?.head_commit).toBeUndefined();
     });
 
     it("acceptTask marks task done and increments completed_count", () => {

@@ -40,7 +40,7 @@ const DEFAULT_CONFIG: MessengerConfig = {
   replyHint: true,
   senderDetailsOnFirstContact: true,
   nameTheme: "default",
-  feedRetention: 50,
+  feedRetention: parseInt(process.env.MESSENGER_FEED_RETENTION ?? '200', 10),
   stuckThreshold: 900,
   stuckNotify: true,
   autoStatus: true,
@@ -152,10 +152,14 @@ export function loadConfig(cwd: string): MessengerConfig {
 
   const nameWords = (merged as Record<string, unknown>).nameWords as { adjectives: string[]; nouns: string[] } | undefined;
 
+  const envFeedRetention = process.env.MESSENGER_FEED_RETENTION
+    ? parseInt(process.env.MESSENGER_FEED_RETENTION, 10)
+    : undefined;
+
   const sharedFields = {
     nameTheme: typeof merged.nameTheme === "string" ? merged.nameTheme : DEFAULT_CONFIG.nameTheme,
     nameWords: nameWords && Array.isArray(nameWords.adjectives) && Array.isArray(nameWords.nouns) ? nameWords : undefined,
-    feedRetention: typeof merged.feedRetention === "number" ? merged.feedRetention : DEFAULT_CONFIG.feedRetention,
+    feedRetention: envFeedRetention ?? (typeof merged.feedRetention === "number" ? merged.feedRetention : 200),
     stuckThreshold: typeof merged.stuckThreshold === "number" ? merged.stuckThreshold : DEFAULT_CONFIG.stuckThreshold,
     stuckNotify: merged.stuckNotify !== false,
     autoStatus: merged.autoStatus !== false,

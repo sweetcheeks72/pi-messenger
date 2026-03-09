@@ -162,6 +162,7 @@ export interface CrewParams {
 
   // Feed
   limit?: number;
+  filter?: string;
 
   // Question protocol
   question?: string;

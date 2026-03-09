@@ -217,6 +217,61 @@ function pruneTransitiveDeps(cwd: string, taskIds: string[]): void {
   }
 }
 
+// =============================================================================
+// Plan State Reconciliation
+// =============================================================================
+
+/**
+ * Detect and fix desynced planning state.
+ *
+ * Desync scenarios:
+ *   - activePlan exists but tasks directory is missing or empty
+ *   - activePlan exists but plan.json is corrupt/invalid
+ *   - task_count in plan.json doesn't match actual task files on disk
+ *
+ * Returns a description of what was fixed, or null if no fix was needed.
+ */
+export function reconcilePlanState(cwd: string): string | null {
+  const plan = store.getPlan(cwd);
+
+  // No plan — nothing to reconcile
+  if (!plan) return null;
+
+  const tasks = store.getTasks(cwd);
+  const issues: string[] = [];
+
+  // Check: activePlan exists but task graph is empty/invalid
+  const hasValidTasks = tasks.length > 0;
+  if (!hasValidTasks) {
+    issues.push(`plan.json exists (run ${plan.run_id}) but task graph is empty`);
+  }
+
+  // Check: task_count mismatch
+  if (plan.task_count !== tasks.length) {
+    issues.push(`task_count mismatch: plan says ${plan.task_count}, found ${tasks.length} task files`);
+    // Auto-fix: update task_count to match reality
+    store.updatePlan(cwd, { task_count: tasks.length });
+  }
+
+  // Check: completed_count mismatch
+  const actualDone = tasks.filter(t => t.status === "done").length;
+  if (plan.completed_count !== actualDone) {
+    issues.push(`completed_count mismatch: plan says ${plan.completed_count}, found ${actualDone} done tasks`);
+    // Auto-fix: update completed_count to match reality
+    store.updatePlan(cwd, { completed_count: actualDone });
+  }
+
+  // If plan exists but task graph is completely empty (desync), reset planning state
+  if (!hasValidTasks && plan.task_count > 0) {
+    issues.push(`resetting desynced plan state (activePlan with task_count=${plan.task_count} but 0 tasks on disk)`);
+    store.deletePlan(cwd);
+    return `Reconciled: ${issues.join("; ")}`;
+  }
+
+  if (issues.length === 0) return null;
+  return `Reconciled: ${issues.join("; ")}`;
+}
+
 export async function execute(
   params: CrewParams,
   ctx: ExtensionContext,
@@ -226,6 +281,14 @@ export async function execute(
   const cwd = ctx.cwd ?? process.cwd();
   const { prd, prompt } = params;
   const crewNamespace = resolveCrewNamespace(params);
+
+  // Reconcile any desynced plan state before proceeding
+  const reconcileMessage = reconcilePlanState(cwd);
+  if (reconcileMessage) {
+    logFeedEvent(cwd, agentName, "plan.start", "(reconcile)", reconcileMessage);
+    notify(ctx, `Plan state reconciled: ${reconcileMessage}`, "warning");
+  }
+
   const isSharedNamespace = crewNamespace === "shared";
   const plannerTaskId = namespacedTaskId("__planner__", crewNamespace);
   const reviewerTaskId = namespacedTaskId("__reviewer__", crewNamespace);

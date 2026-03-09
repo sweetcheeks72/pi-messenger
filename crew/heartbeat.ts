@@ -25,6 +25,17 @@ export interface Heartbeat {
 }
 
 // =============================================================================
+// Constants
+// =============================================================================
+
+/**
+ * How long (ms) before a heartbeat is considered stale/stuck.
+ * Configurable via MESSENGER_HEARTBEAT_TIMEOUT_MS env var.
+ * Default: 120000ms (2 minutes).
+ */
+const HEARTBEAT_TIMEOUT_MS = parseInt(process.env.MESSENGER_HEARTBEAT_TIMEOUT_MS ?? '120000', 10);
+
+// =============================================================================
 // Directory Helpers
 // =============================================================================
 
@@ -84,9 +95,10 @@ export function getHeartbeats(cwd: string): Heartbeat[] {
 }
 
 /**
- * Return heartbeats that are older than thresholdMs (default: 2 minutes).
+ * Return heartbeats that are older than thresholdMs.
+ * Defaults to HEARTBEAT_TIMEOUT_MS (configurable via MESSENGER_HEARTBEAT_TIMEOUT_MS env var, default: 3 minutes).
  */
-export function getStaleAgents(cwd: string, thresholdMs: number = 120_000): Heartbeat[] {
+export function getStaleAgents(cwd: string, thresholdMs: number = HEARTBEAT_TIMEOUT_MS): Heartbeat[] {
   const now = Date.now();
   return getHeartbeats(cwd).filter(hb => {
     const age = now - new Date(hb.timestamp).getTime();

@@ -16,6 +16,7 @@ import * as store from "../store.js";
 import { logFeedEvent, appendFeedEvent } from "../../feed.js";
 import { executeTaskAction } from "../task-actions.js";
 import { taskRevise, taskReviseTree } from "./revise.js";
+import { heartbeatTimestamps } from "../../lib.js";
 export { executeRevise, executeReviseTree, type ReviseResult } from "./revise.js";
 
 type NamespaceParams = CrewParams & { crew?: string; crewNamespace?: string; namespace?: string; };
@@ -446,8 +447,13 @@ function taskHeartbeat(cwd: string, params: CrewParams, state: MessengerState, _
   const { id } = params;
   if (!id) return result("Error: id required for task.heartbeat", { mode: "task.heartbeat", error: "missing_id" });
 
+  const ts = new Date().toISOString();
+
+  // Update the in-memory heartbeat map so checkStaleHeartbeats() sees API-triggered heartbeats
+  heartbeatTimestamps.set(id, ts);
+
   appendFeedEvent(cwd, {
-    ts: new Date().toISOString(),
+    ts,
     agent: state.agentName || "unknown",
     type: "task.heartbeat",
     target: id,
@@ -457,7 +463,7 @@ function taskHeartbeat(cwd: string, params: CrewParams, state: MessengerState, _
   return result(`💓 Heartbeat emitted for ${id}`, {
     mode: "task.heartbeat",
     id,
-    ts: new Date().toISOString(),
+    ts,
   });
 }
 

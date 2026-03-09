@@ -92,7 +92,7 @@ export async function executeCrewAction(
     }
 
     case 'feed': {
-      return handlers.executeFeed(ctx.cwd ?? process.cwd(), params.limit, config?.crewEventsInFeed ?? true);
+      return handlers.executeFeed(ctx.cwd ?? process.cwd(), params.limit, config?.crewEventsInFeed ?? true, params.filter);
     }
 
     case 'spec':

@@ -784,7 +784,8 @@ export function executeSetStatus(
 export function executeFeed(
   cwd: string,
   limit?: number,
-  crewEventsInFeed: boolean = true
+  crewEventsInFeed: boolean = true,
+  filter?: string
 ) {
   const effectiveLimit = limit ?? 20;
   let events: FeedEvent[];
@@ -794,6 +795,9 @@ export function executeFeed(
     events = events.slice(-effectiveLimit);
   } else {
     events = readFeedEvents(cwd, effectiveLimit);
+  }
+  if (filter) {
+    events = events.filter(e => e.type === filter);
   }
 
   if (events.length === 0) {

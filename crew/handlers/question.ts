@@ -35,7 +35,13 @@ export interface QuestionEntry {
 // Constants
 // =============================================================================
 
-const TIMEOUT_MS = 60_000; // 60 seconds
+/**
+ * Timeout for pending questions before they are marked as 'timeout'.
+ * Configurable via MESSENGER_QUESTION_TIMEOUT_MS env var. Default: 60 seconds.
+ * When timeout fires without an answer, workers should proceed with best-guess
+ * rather than blocking indefinitely.
+ */
+const QUESTION_TIMEOUT_MS = parseInt(process.env.MESSENGER_QUESTION_TIMEOUT_MS ?? '60000', 10);
 
 // =============================================================================
 // Store helpers
@@ -61,11 +67,14 @@ function saveQuestions(cwd: string, questions: QuestionEntry[]): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.writeFileSync(p, JSON.stringify(questions, null, 2));
+  const tmpPath = `${p}.tmp.${process.pid}`;
+  fs.writeFileSync(tmpPath, JSON.stringify(questions, null, 2));
+  fs.renameSync(tmpPath, p);
 }
 
 /**
  * Sweep pending questions and mark any that have exceeded the timeout as 'timeout'.
+ * Workers should proceed with best-guess when a question times out rather than blocking.
  * Returns the number of questions that were timed out.
  */
 function sweepTimeouts(cwd: string, questions: QuestionEntry[]): number {
@@ -74,9 +83,27 @@ function sweepTimeouts(cwd: string, questions: QuestionEntry[]): number {
   for (const q of questions) {
     if (q.status === "pending") {
       const age = now - new Date(q.timestamp).getTime();
-      if (age >= TIMEOUT_MS) {
+      if (age >= QUESTION_TIMEOUT_MS) {
         q.status = "timeout";
         timedOut++;
+        // Log warning so asking workers know to proceed with best-guess
+        console.warn(
+          `[pi-messenger] Question ${q.id} from ${q.from} to ${q.to} timed out after ${Math.round(age / 1000)}s. ` +
+          `Workers should proceed with best-guess. Question: "${q.question}"`
+        );
+        // Append timeout notice to the asking task's progress log
+        if (q.taskId) {
+          try {
+            store.appendTaskProgress(
+              cwd,
+              q.taskId,
+              "system",
+              `Question ${q.id} to ${q.to} timed out after ${Math.round(age / 1000)}s — proceed with best-guess. Question: "${q.question}"`
+            );
+          } catch {
+            // appendTaskProgress may fail if crew dir doesn't exist yet
+          }
+        }
       }
     }
   }
@@ -233,8 +260,9 @@ function questionAnswer(cwd: string, params: CrewParams, state: MessengerState) 
   logFeedEvent(cwd, from, "question.answer", questionId, answer);
 
   // Append answer to asking task's progress log (if taskId known)
-  // TODO: timeout semantics not yet implemented — questions wait indefinitely.
-  // Workaround: worker can check pi_messenger({ action: "feed", filter: "question.answer" })
+  // Timeout sweep is implemented via sweepTimeouts() in the questions list handler,
+  // but it is passive — timeouts are only evaluated when the question list is fetched,
+  // not on a background timer. Questions that are never listed will wait indefinitely.
   if (entry.taskId) {
     store.appendTaskProgress(cwd, entry.taskId, "system", `Answer from ${from}: ${answer}`);
   }
