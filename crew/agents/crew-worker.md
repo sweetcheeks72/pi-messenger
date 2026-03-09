@@ -1,7 +1,7 @@
 ---
 name: crew-worker
 description: Implements a single crew task with mesh coordination
-tools: read, write, edit, bash, pi_messenger, interview
+tools: read, write, edit, bash, pi_messenger
 model: openai-codex/gpt-5.3-codex, anthropic/claude-opus-4-6, google/gemini-3.1-pro-preview
 crewRole: worker
 maxOutput: { bytes: 204800, lines: 5000 }
@@ -50,9 +50,10 @@ pi_messenger({ action: "reserve", paths: ["src/path/to/files/"], reason: "<TASK_
 ## User Clarification
 
 If your task spec leaves major gaps in user intent, missing acceptance criteria, or unstated tradeoffs (e.g. speed vs safety, specific library choices):
-1. Use the `interview` tool to present a structured clarification form to the user.
-2. After the interview completes, log the clarification result using `pi_messenger({ action: "task.progress", id: "<TASK_ID>", message: "Clarified scope: <result>" })`.
-3. If the user's responses don't resolve the ambiguity or introduce a blocker, use `pi_messenger({ action: "task.block", id: "<TASK_ID>", reason: "..." })`.
+1. Ask the orchestrator via the question protocol: `pi_messenger({ action: "ask", to: "<orchestrator>", question: "..." })`.
+   The `interview` tool is available to the orchestrator (Helios) only — crew workers use the question protocol instead.
+2. After receiving clarification, log the result using `pi_messenger({ action: "task.progress", id: "<TASK_ID>", message: "Clarified scope: <result>" })`.
+3. If the clarification doesn't resolve the ambiguity or introduces a blocker, use `pi_messenger({ action: "task.block", id: "<TASK_ID>", reason: "..." })`.
 
 ## Phase 4: Implement
 
@@ -101,6 +102,17 @@ pi_messenger({ action: "task.escalate", id: "<TASK_ID>", severity: "critical", r
 ```
 
 Severity `block` and `critical` automatically mark the task blocked so Helios is alerted. Use `task.escalate` only when genuinely stuck — not as a substitute for trying to solve the problem yourself.
+
+## Receiving Answers
+
+If you asked a question and are waiting for an answer, check your inbox:
+
+```typescript
+pi_messenger({ action: "inbox.list" })
+```
+
+Answers arrive as `{ type: "question.answer", questionId, answer }` messages.
+Process the answer and continue your task.
 
 ## Phase 5: Commit
 

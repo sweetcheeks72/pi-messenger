@@ -6,6 +6,8 @@
  */
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import * as fs from "node:fs";
+import * as nodePath from "node:path";
 import type { MessengerState, Dirs, AgentMailMessage, NameThemeConfig } from "../lib.js";
 import * as handlers from "../handlers.js";
 import type { CrewParams, AppendEntryFn } from "./types.js";
@@ -230,6 +232,42 @@ export async function executeCrewAction(
         return result(`Error: answer handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
           { mode: "answer", error: "handler_error" });
       }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Inbox — consume-on-read inbox for the current agent
+    // ═══════════════════════════════════════════════════════════════════════
+    case 'inbox': {
+      if (op === 'list') {
+        const cwd = ctx.cwd ?? process.cwd();
+        const agentName = state.agentName;
+        if (!agentName) {
+          return result("Error: agent name not set. Join the mesh first with pi_messenger({ action: \"join\" }).",
+            { mode: "inbox.list", error: "no_agent_name" });
+        }
+        const inboxDir = nodePath.join(cwd, ".pi", "messenger", "inbox", agentName);
+        if (!fs.existsSync(inboxDir)) {
+          return result("Inbox is empty.", { mode: "inbox.list", messages: [] });
+        }
+        const files = fs.readdirSync(inboxDir).filter((f: string) => f.endsWith(".json")).sort();
+        const messages: unknown[] = [];
+        for (const file of files) {
+          const filePath = nodePath.join(inboxDir, file);
+          try {
+            const msg = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+            messages.push(msg);
+            fs.unlinkSync(filePath);
+          } catch {
+            // skip malformed files
+          }
+        }
+        if (messages.length === 0) {
+          return result("Inbox is empty.", { mode: "inbox.list", messages: [] });
+        }
+        return result(`# Inbox (${messages.length} message${messages.length === 1 ? "" : "s"})\n\n${messages.map(m => JSON.stringify(m, null, 2)).join("\n---\n")}`,
+          { mode: "inbox.list", messages });
+      }
+      return result(`Unknown inbox operation: inbox.${op ?? "(none)"}`, { mode: "inbox", error: "unknown_operation" });
     }
 
     case 'questions': {

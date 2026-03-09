@@ -2,9 +2,10 @@
  * FIX 1: task.escalate inbox push to Helios
  *
  * Tests:
- *   - severity=block → inbox file written at .pi/messenger/inbox/helios/
- *   - severity=critical → inbox file written at .pi/messenger/inbox/helios/
+ *   - severity=block → inbox file written at .pi/messenger/inbox/<orchestrator>/
+ *   - severity=critical → inbox file written at .pi/messenger/inbox/<orchestrator>/
  *   - severity=warn → no inbox file written
+ *   - config.orchestrator overrides hardcoded 'helios'
  */
 
 import * as fs from "node:fs";
@@ -22,8 +23,18 @@ function makeCtx(cwd: string) {
   return { cwd, ui: { notify: () => {} } } as any;
 }
 
-function heliosInboxDir(cwd: string) {
-  return path.join(cwd, ".pi", "messenger", "inbox", "helios");
+function orchestratorInboxDir(cwd: string, orchestrator = "helios") {
+  return path.join(cwd, ".pi", "messenger", "inbox", orchestrator);
+}
+
+/** Write a minimal crew config.json that sets orchestrator to the given name */
+function setOrchestratorConfig(cwd: string, orchestratorName: string): void {
+  const crewDir = path.join(cwd, ".pi", "messenger", "crew");
+  fs.mkdirSync(crewDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(crewDir, "config.json"),
+    JSON.stringify({ orchestrator: orchestratorName }),
+  );
 }
 
 describe("task.escalate inbox push to Helios", () => {
@@ -40,7 +51,7 @@ describe("task.escalate inbox push to Helios", () => {
       makeCtx(cwd),
     );
 
-    const inboxDir = heliosInboxDir(cwd);
+    const inboxDir = orchestratorInboxDir(cwd, "helios");
     expect(fs.existsSync(inboxDir)).toBe(true);
 
     const files = fs.readdirSync(inboxDir).filter(f => f.endsWith(".json"));
@@ -67,7 +78,7 @@ describe("task.escalate inbox push to Helios", () => {
       makeCtx(cwd),
     );
 
-    const inboxDir = heliosInboxDir(cwd);
+    const inboxDir = orchestratorInboxDir(cwd, "helios");
     const files = fs.readdirSync(inboxDir).filter(f => f.endsWith(".json"));
     expect(files.length).toBe(1);
 
@@ -90,13 +101,48 @@ describe("task.escalate inbox push to Helios", () => {
       makeCtx(cwd),
     );
 
-    const inboxDir = heliosInboxDir(cwd);
+    const inboxDir = orchestratorInboxDir(cwd, "helios");
     // Either the directory doesn't exist, or it exists but has no files
     if (fs.existsSync(inboxDir)) {
       const files = fs.readdirSync(inboxDir).filter(f => f.endsWith(".json"));
       expect(files.length).toBe(0);
     } else {
       expect(fs.existsSync(inboxDir)).toBe(false);
+    }
+  });
+
+  it("routes escalation to config.orchestrator inbox (not hardcoded helios)", async () => {
+    const { cwd } = createTempCrewDirs();
+    setOrchestratorConfig(cwd, "test-orchestrator");
+    store.createPlan(cwd, "docs/PRD.md");
+    const task = store.createTask(cwd, "Config Test Task");
+    store.startTask(cwd, task.id, "TestWorker");
+
+    await execute(
+      "escalate",
+      { id: task.id, reason: "Custom orchestrator test", severity: "block" },
+      makeState(),
+      makeCtx(cwd),
+    );
+
+    // Should land in test-orchestrator inbox, NOT helios inbox
+    const customInboxDir = orchestratorInboxDir(cwd, "test-orchestrator");
+    expect(fs.existsSync(customInboxDir)).toBe(true);
+
+    const files = fs.readdirSync(customInboxDir).filter(f => f.endsWith(".json"));
+    expect(files.length).toBe(1);
+
+    const msg = JSON.parse(fs.readFileSync(path.join(customInboxDir, files[0]!), "utf-8"));
+    expect(msg.type).toBe("task.escalate");
+    expect(msg.taskId).toBe(task.id);
+
+    // Confirm the helios inbox was NOT written
+    const heliosDir = orchestratorInboxDir(cwd, "helios");
+    if (fs.existsSync(heliosDir)) {
+      const heliosFiles = fs.readdirSync(heliosDir).filter(f => f.endsWith(".json"));
+      expect(heliosFiles.length).toBe(0);
+    } else {
+      expect(fs.existsSync(heliosDir)).toBe(false);
     }
   });
 });

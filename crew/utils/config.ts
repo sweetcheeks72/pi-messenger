@@ -80,6 +80,11 @@ export interface CrewConfig {
     /** Minimum number of in_progress tasks before smoke tests trigger */
     minActiveTasks: number;
   };
+  /**
+   * Name of the orchestrator agent. Escalations are delivered to this agent's inbox.
+   * Defaults to 'helios'. Override per-project if the orchestrator joins with a different name.
+   */
+  orchestrator?: string;
 }
 
 const DEFAULT_CONFIG: CrewConfig = {
@@ -103,6 +108,7 @@ const DEFAULT_CONFIG: CrewConfig = {
   coordination: "chatty",
   messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: 10 },
   smokeTest: { enabled: true, intervalMs: 120_000, minActiveTasks: 3 },
+  orchestrator: "helios",
 };
 
 function loadJson(filePath: string): Record<string, unknown> {

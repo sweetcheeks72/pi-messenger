@@ -430,18 +430,26 @@ function taskEscalate(cwd: string, params: CrewParams, state: MessengerState, na
   if (severity === "block" || severity === "critical") {
     store.blockTask(cwd, id, reason);
 
-    // Deliver escalation to Helios inbox so orchestrator sees it immediately
-    const inboxDir = path.join(cwd, ".pi", "messenger", "inbox", "helios");
-    fs.mkdirSync(inboxDir, { recursive: true });
+    // Deliver escalation to orchestrator inbox so orchestrator sees it immediately.
+    // The orchestrator name is configurable via crew config; defaults to 'helios'.
+    const config = loadCrewConfig(store.getCrewDir(cwd));
+    const orchestratorName = config.orchestrator ?? "helios";
+    const inboxDir = path.join(cwd, ".pi", "messenger", "inbox", orchestratorName);
     const inboxFile = path.join(inboxDir, `${Date.now()}-escalate-${id}.json`);
-    fs.writeFileSync(inboxFile, JSON.stringify({
-      type: "task.escalate",
-      taskId: id,
-      reason,
-      severity,
-      suggestion,
-      timestamp: new Date().toISOString(),
-    }));
+    try {
+      fs.mkdirSync(inboxDir, { recursive: true });
+      fs.writeFileSync(inboxFile, JSON.stringify({
+        type: "task.escalate",
+        taskId: id,
+        reason,
+        severity,
+        suggestion,
+        timestamp: new Date().toISOString(),
+      }));
+    } catch (e) {
+      // inbox delivery is best-effort; feed event was already written
+      console.warn(`[crew] escalate inbox write failed: ${e}`);
+    }
   }
 
   const suggestionStr = suggestion ? `\n**Suggestion:** ${suggestion}` : "";

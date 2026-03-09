@@ -7,7 +7,9 @@ describe("checked-in crew agent prompts", () => {
     const workerPrompt = fs.readFileSync(path.join(process.cwd(), "crew", "agents", "crew-worker.md"), "utf8");
     const plannerPrompt = fs.readFileSync(path.join(process.cwd(), "crew", "agents", "crew-planner.md"), "utf8");
 
-    expect(workerPrompt).toContain("tools: read, write, edit, bash, pi_messenger, interview");
+    // interview is orchestrator-only; crew workers use the question protocol instead
+    expect(workerPrompt).toContain("tools: read, write, edit, bash, pi_messenger");
+    expect(workerPrompt).not.toContain("tools: read, write, edit, bash, pi_messenger, interview");
     expect(workerPrompt).toContain("## User Clarification");
     expect(workerPrompt).toContain("task.progress");
     expect(workerPrompt).toContain("task.block");
