@@ -142,6 +142,22 @@ function deepMerge<T extends object>(target: T, ...sources: Partial<T>[]): T {
 }
 
 /**
+ * Save (partial) crew configuration to the project-level config file.
+ * Merges with any existing project config so unrelated keys are preserved.
+ */
+export function saveCrewConfig(crewDir: string, updates: Partial<CrewConfig>): void {
+  const configPath = path.join(crewDir, PROJECT_CONFIG_FILE);
+  const existing = loadJson(configPath) as Partial<CrewConfig>;
+  const merged = { ...existing, ...updates };
+  try {
+    fs.mkdirSync(crewDir, { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify(merged, null, 2));
+  } catch (e) {
+    console.warn("[crew] failed to save config:", e);
+  }
+}
+
+/**
  * Load crew configuration with priority: defaults <- user <- project
  */
 export function loadCrewConfig(crewDir: string): CrewConfig {

@@ -12,6 +12,7 @@ import type { MessengerState, Dirs, AgentMailMessage, NameThemeConfig } from "..
 import * as handlers from "../handlers.js";
 import type { CrewParams, AppendEntryFn } from "./types.js";
 import { result } from "./utils/result.js";
+import { loadCrewConfig, saveCrewConfig } from "./utils/config.js";
 import { isPlanningForCwd, cancelPlanningRun } from "./state.js";
 import { logFeedEvent } from "../feed.js";
 
@@ -53,7 +54,15 @@ export async function executeCrewAction(
 
   // join - this is how you register
   if (group === 'join') {
-    return handlers.executeJoin(state, dirs, ctx, deliverMessage, updateStatus, params.spec, config?.nameTheme, config?.feedRetention);
+    const joinResult = handlers.executeJoin(state, dirs, ctx, deliverMessage, updateStatus, params.spec, config?.nameTheme, config?.feedRetention);
+    // If the caller is the orchestrator, persist their assigned peer name to config
+    // so that subsequent escalations route to the right inbox address.
+    if (params.isOrchestrator === true && state.registered && state.agentName) {
+      const cwd = ctx.cwd ?? process.cwd();
+      const crewDir = nodePath.join(cwd, ".pi", "messenger", "crew");
+      saveCrewConfig(crewDir, { orchestrator: state.agentName });
+    }
+    return joinResult;
   }
 
   // autoRegisterPath - config management, not agent operation

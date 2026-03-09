@@ -145,4 +145,40 @@ describe("task.escalate inbox push to Helios", () => {
       expect(fs.existsSync(heliosDir)).toBe(false);
     }
   });
+
+  it("FIX 4: inbox write failure is best-effort — escalate succeeds and task is blocked", async () => {
+    const { cwd } = createTempCrewDirs();
+    store.createPlan(cwd, "docs/PRD.md");
+    const task = store.createTask(cwd, "Risky Task");
+    store.startTask(cwd, task.id, "TestWorker");
+
+    // Cause the inbox write to fail by placing a regular FILE at the
+    // directory path the code tries to mkdirSync. On all POSIX systems,
+    // mkdirSync({ recursive: true }) on a path that exists as a file
+    // throws ENOTDIR, which is exactly the disk-I/O failure we want to simulate.
+    const inboxParent = path.join(cwd, ".pi", "messenger", "inbox");
+    fs.mkdirSync(inboxParent, { recursive: true });
+    // "helios" is the default orchestrator — put a file here so mkdir fails
+    fs.writeFileSync(path.join(inboxParent, "helios"), "blocker-not-a-dir");
+
+    let thrownError: unknown = null;
+    try {
+      await execute(
+        "escalate",
+        { id: task.id, reason: "Simulated disk failure", severity: "block" },
+        makeState(),
+        makeCtx(cwd),
+      );
+    } catch (e) {
+      thrownError = e;
+    }
+
+    // The function must NOT throw — inbox failure is best-effort
+    expect(thrownError).toBeNull();
+
+    // The task MUST still be blocked — store.blockTask was called before the inbox write
+    const updated = store.getTask(cwd, task.id);
+    expect(updated?.status).toBe("blocked");
+    expect(updated?.blocked_reason).toBe("Simulated disk failure");
+  });
 });

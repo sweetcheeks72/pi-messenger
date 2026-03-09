@@ -55,6 +55,31 @@ describe("executeFeed filter", () => {
     expect(events).toHaveLength(0);
   });
 
+  it("crewEventsInFeed=false + explicit filter returns matching crew events (filter overrides stripping)", () => {
+    appendFeedEvent(cwd, {
+      ts: new Date().toISOString(),
+      agent: "WorkerA",
+      type: "task.escalate",
+      target: "task-3",
+      preview: "[block] DB is down",
+    });
+    appendFeedEvent(cwd, {
+      ts: new Date().toISOString(),
+      agent: "WorkerB",
+      type: "task.progress",
+      target: "task-3",
+      preview: "50% done",
+    });
+    logFeedEvent(cwd, "AgentA", "join");
+
+    // crewEventsInFeed=false would normally strip task.escalate/task.progress,
+    // but an explicit filter should override that and return matching events.
+    const result = executeFeed(cwd, 20, false, "task.escalate");
+    const events = result.details.events as Array<{ type: string }>;
+    expect(events.length).toBeGreaterThan(0);
+    expect(events.every(e => e.type === "task.escalate")).toBe(true);
+  });
+
   it("crewEventsInFeed=false excludes crew events when no filter", () => {
     logFeedEvent(cwd, "AgentA", "join");
     appendFeedEvent(cwd, {

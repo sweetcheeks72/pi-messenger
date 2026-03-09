@@ -789,7 +789,11 @@ export function executeFeed(
 ) {
   const effectiveLimit = limit ?? 20;
   let events: FeedEvent[];
-  if (!crewEventsInFeed) {
+  // When a filter is explicitly provided, skip the crewEventsInFeed stripping:
+  // an explicit filter expresses intent to see those events regardless of the
+  // default-hide setting (e.g. filter:'task.escalate' + crewEventsInFeed=false
+  // should still return matching escalate events, not an empty list).
+  if (!crewEventsInFeed && !filter) {
     events = readFeedEvents(cwd, effectiveLimit * 2);
     events = events.filter(e => !isCrewEvent(e.type));
     events = events.slice(-effectiveLimit);

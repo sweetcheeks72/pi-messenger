@@ -157,6 +157,9 @@ export interface CrewParams {
   detail?: string;
   phase?: string;
 
+  // Join options
+  isOrchestrator?: boolean;      // If true, saves agentName to config.orchestrator on join
+
   // Escalation (task.escalate)
   severity?: "warn" | "block" | "critical";
   suggestion?: string;
