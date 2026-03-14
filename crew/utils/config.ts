@@ -70,6 +70,8 @@ export interface CrewConfig {
     shutdownGracePeriodMs?: number;
     /** Override the spawned executable (default: "pi"). Also overridden by PI_CREW_EXECUTABLE env var. */
     executable?: string;
+    /** Maximum time in ms a worker may run before being killed with SIGTERM (default: 900000 = 15 min). */
+    workerTimeoutMs?: number;
   };
   dependencies: "advisory" | "strict";
   coordination: CoordinationLevel;

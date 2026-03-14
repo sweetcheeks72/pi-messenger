@@ -31,6 +31,7 @@ import {
   buildFileReservationContext,
   type TaskFileClaim,
 } from "../utils/file-overlap.js";
+import { reconcileOrphanedTasks } from "../reconcile.js";
 
 type NamespaceParams = CrewParams & {
   crew?: string;
@@ -687,6 +688,14 @@ export async function execute(
 
   store.autoCompleteMilestones(cwd);
   syncCompletedCount(cwd, crewNamespace);
+
+  // Recover any orphaned tasks (workers that died without releasing their lease)
+  const reconcileResult = await reconcileOrphanedTasks(cwd, crewNamespace);
+  if (reconcileResult.reset.length > 0) {
+    console.log(`[crew] reconciler reset ${reconcileResult.reset.length} orphaned task(s): ${reconcileResult.reset.join(", ")}`);
+    logFeedEvent(cwd, "crew", "task.reset", reconcileResult.reset.join(","),
+      `Recovered ${reconcileResult.reset.length} orphaned task(s): ${reconcileResult.reset.join(", ")}`);
+  }
 
   // Get ready tasks — auto-block any that exceeded max attempts
   const allReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory", namespace: crewNamespace });
