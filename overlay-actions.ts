@@ -11,9 +11,10 @@ import { getLiveWorkers } from "./crew/live-progress.js";
 import { hasActiveWorker } from "./crew/registry.js";
 import { cancelPlanningRun } from "./crew/state.js";
 import { listCheckpoints, restoreCheckpoint } from "./crew/utils/checkpoint.js";
+import type { MonitorRegistry } from "./src/monitor/registry.js";
 
 interface ConfirmAction {
-  type: "reset" | "cascade-reset" | "delete" | "cancel-planning";
+  type: "reset" | "cascade-reset" | "delete" | "cancel-planning" | "end-session";
   taskId: string;
   label: string;
 }
@@ -21,7 +22,7 @@ interface ConfirmAction {
 export interface CrewViewState {
   scrollOffset: number;
   selectedTaskIndex: number;
-  mode: "list" | "detail";
+  mode: "list" | "detail" | "monitor" | "monitor-detail";
   detailScroll: number;
   detailAutoScroll: boolean;
   confirmAction: ConfirmAction | null;
@@ -38,6 +39,10 @@ export interface CrewViewState {
   mentionIndex: number;
   /** Scroll lock: true when user has scrolled up (auto-scroll paused) */
   scrollLocked: boolean;
+  /** Selected session index in the monitor overview */
+  monitorSelectedIndex: number;
+  /** Scroll offset for monitor detail view */
+  monitorDetailScroll: number;
 }
 
 export function createCrewViewState(): CrewViewState {
@@ -60,6 +65,8 @@ export function createCrewViewState(): CrewViewState {
     mentionCandidates: [],
     mentionIndex: -1,
     scrollLocked: false,
+    monitorSelectedIndex: 0,
+    monitorDetailScroll: 0,
   };
 }
 
@@ -134,10 +141,21 @@ function previewText(text: string): string {
   return text.length > 200 ? `${text.slice(0, 197)}...` : text;
 }
 
-export function handleConfirmInput(data: string, viewState: CrewViewState, cwd: string, agentName: string, tui: TUI): void {
+export function handleConfirmInput(data: string, viewState: CrewViewState, cwd: string, agentName: string, tui: TUI, registry?: MonitorRegistry): void {
   const action = viewState.confirmAction;
   if (!action) return;
   if (matchesKey(data, "y")) {
+    if (action.type === "end-session") {
+      viewState.confirmAction = null;
+      if (registry) {
+        const result = registry.commandHandler.execute({ action: "end", sessionId: action.taskId });
+        setNotification(viewState, tui, result.success, result.success ? `Session "${action.label}" ended` : (result.error ?? "Failed to end session"));
+      } else {
+        setNotification(viewState, tui, false, "No monitor registry available");
+      }
+      tui.requestRender();
+      return;
+    }
     if (action.type === "cancel-planning") {
       cancelPlanningRun(cwd);
       logFeedEvent(cwd, agentName, "plan.cancel");
@@ -525,6 +543,75 @@ export function handleCrewKeyBinding(
     viewState.inputMode = "revise-prompt";
     viewState.reviseScope = "tree";
     viewState.revisePromptInput = "";
+    tui.requestRender();
+    return;
+  }
+}
+
+
+export function handleMonitorDetailKeyBinding(
+  data: string,
+  viewState: CrewViewState,
+  registry: MonitorRegistry | undefined,
+  tui: TUI,
+): void {
+  if (!registry) {
+    setNotification(viewState, tui, false, "No monitor registry available");
+    tui.requestRender();
+    return;
+  }
+
+  const sessions = registry.store.list();
+  const session = sessions[viewState.monitorSelectedIndex];
+  if (!session) {
+    setNotification(viewState, tui, false, "No session selected");
+    tui.requestRender();
+    return;
+  }
+
+  const sessionId = session.metadata.id;
+  const status = session.status;
+  const liveWorkerBacked = Boolean(session.metadata.taskId) && hasActiveWorker(session.metadata.cwd, session.metadata.taskId!);
+
+  if (matchesKey(data, "p")) {
+    if (liveWorkerBacked) {
+      setNotification(viewState, tui, false, "Pause/resume are monitor-only and unavailable for a live worker session");
+    } else if (status === "active") {
+      const result = registry.commandHandler.execute({ action: "pause", sessionId });
+      setNotification(viewState, tui, result.success, result.success ? "Monitor session paused" : (result.error ?? "Failed to pause"));
+    } else if (status === "paused") {
+      const result = registry.commandHandler.execute({ action: "resume", sessionId });
+      setNotification(viewState, tui, result.success, result.success ? "Monitor session resumed" : (result.error ?? "Failed to resume"));
+    } else {
+      setNotification(viewState, tui, false, `Cannot pause/resume: session is ${status}`);
+    }
+    tui.requestRender();
+    return;
+  }
+
+  if (matchesKey(data, "e")) {
+    if (status === "ended") {
+      setNotification(viewState, tui, false, "Session already ended");
+      tui.requestRender();
+      return;
+    }
+    viewState.confirmAction = {
+      type: "end-session",
+      taskId: sessionId,
+      label: session.metadata.name,
+    };
+    tui.requestRender();
+    return;
+  }
+
+  if (matchesKey(data, "i")) {
+    const result = registry.commandHandler.execute({ action: "inspect", sessionId });
+    if (result.success) {
+      const info = `${session.metadata.name} | ${status} | ${session.metrics.toolCalls} tools | ${session.metrics.errorCount} errors`;
+      setNotification(viewState, tui, true, `Snapshot: ${info}`);
+    } else {
+      setNotification(viewState, tui, false, result.error ?? "Snapshot failed");
+    }
     tui.requestRender();
     return;
   }

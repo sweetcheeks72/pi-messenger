@@ -43,6 +43,26 @@ const PROGRESS_FILE = "planning-progress.md";
 const OUTLINE_FILE = "planning-outline.md";
 const MAX_PROGRESS_PROMPT_SIZE = 50000;
 
+type NamespaceParams = CrewParams & {
+  crew?: string;
+  crewNamespace?: string;
+  namespace?: string;
+};
+
+function resolveCrewNamespace(params: CrewParams): string {
+  const ns =
+    (params as NamespaceParams).crewNamespace
+    ?? (params as NamespaceParams).crew
+    ?? (params as NamespaceParams).namespace
+    ?? "shared";
+  const normalized = typeof ns === "string" ? ns.trim() : "";
+  return normalized.length > 0 ? normalized : "shared";
+}
+
+function namespacedTaskId(taskId: string, crewNamespace: string): string {
+  return crewNamespace === "shared" ? taskId : `${crewNamespace}::${taskId}`;
+}
+
 function getProgressPath(cwd: string): string {
   return path.join(store.getCrewDir(cwd), PROGRESS_FILE);
 }
@@ -197,6 +217,61 @@ function pruneTransitiveDeps(cwd: string, taskIds: string[]): void {
   }
 }
 
+// =============================================================================
+// Plan State Reconciliation
+// =============================================================================
+
+/**
+ * Detect and fix desynced planning state.
+ *
+ * Desync scenarios:
+ *   - activePlan exists but tasks directory is missing or empty
+ *   - activePlan exists but plan.json is corrupt/invalid
+ *   - task_count in plan.json doesn't match actual task files on disk
+ *
+ * Returns a description of what was fixed, or null if no fix was needed.
+ */
+export function reconcilePlanState(cwd: string): string | null {
+  const plan = store.getPlan(cwd);
+
+  // No plan — nothing to reconcile
+  if (!plan) return null;
+
+  const tasks = store.getTasks(cwd);
+  const issues: string[] = [];
+
+  // Check: activePlan exists but task graph is empty/invalid
+  const hasValidTasks = tasks.length > 0;
+  if (!hasValidTasks) {
+    issues.push(`plan.json exists (run ${plan.run_id}) but task graph is empty`);
+  }
+
+  // Check: task_count mismatch
+  if (plan.task_count !== tasks.length) {
+    issues.push(`task_count mismatch: plan says ${plan.task_count}, found ${tasks.length} task files`);
+    // Auto-fix: update task_count to match reality
+    store.updatePlan(cwd, { task_count: tasks.length });
+  }
+
+  // Check: completed_count mismatch
+  const actualDone = tasks.filter(t => t.status === "done").length;
+  if (plan.completed_count !== actualDone) {
+    issues.push(`completed_count mismatch: plan says ${plan.completed_count}, found ${actualDone} done tasks`);
+    // Auto-fix: update completed_count to match reality
+    store.updatePlan(cwd, { completed_count: actualDone });
+  }
+
+  // If plan exists but task graph is completely empty (desync), reset planning state
+  if (!hasValidTasks && plan.task_count > 0) {
+    issues.push(`resetting desynced plan state (activePlan with task_count=${plan.task_count} but 0 tasks on disk)`);
+    store.deletePlan(cwd);
+    return `Reconciled: ${issues.join("; ")}`;
+  }
+
+  if (issues.length === 0) return null;
+  return `Reconciled: ${issues.join("; ")}`;
+}
+
 export async function execute(
   params: CrewParams,
   ctx: ExtensionContext,
@@ -205,46 +280,60 @@ export async function execute(
 ) {
   const cwd = ctx.cwd ?? process.cwd();
   const { prd, prompt } = params;
+  const crewNamespace = resolveCrewNamespace(params);
+
+  // Reconcile any desynced plan state before proceeding
+  const reconcileMessage = reconcilePlanState(cwd);
+  if (reconcileMessage) {
+    logFeedEvent(cwd, agentName, "plan.start", "(reconcile)", reconcileMessage);
+    notify(ctx, `Plan state reconciled: ${reconcileMessage}`, "warning");
+  }
+
+  const isSharedNamespace = crewNamespace === "shared";
+  const plannerTaskId = namespacedTaskId("__planner__", crewNamespace);
+  const reviewerTaskId = namespacedTaskId("__reviewer__", crewNamespace);
   const reportProgress = () => onProgress?.();
-  resetPlanningCancellation();
+  if (isSharedNamespace) {
+    resetPlanningCancellation();
+  }
 
-  const existingPlan = store.getPlan(cwd);
-  if (existingPlan) {
-    const existingTasks = store.getTasks(cwd);
-    const planningActive = isPlanningForCwd(cwd);
+  const isPlanningActiveForNamespace = () => (
+    isSharedNamespace
+      ? isPlanningForCwd(cwd)
+      : getLiveWorkers(cwd).has(plannerTaskId)
+  );
 
-    if (planningActive) {
-      return result("Planning is already in progress.", { mode: "plan", error: "planning_active" });
+  const planningCancelledForNamespace = () => (
+    isSharedNamespace && isPlanningCancelled()
+  );
+
+  const setPlanningPhaseForNamespace = (phase: PlanningPhase, pass: number) => {
+    if (!isSharedNamespace) return;
+    setPlanningPhase(cwd, phase, pass);
+  };
+
+  const finishPlanningRunForNamespace = (status: "completed" | "failed", pass: number) => {
+    if (!isSharedNamespace) return;
+    finishPlanningRun(cwd, status, pass);
+  };
+
+  const advancePhaseForNamespace = (
+    phase: PlanningPhase,
+    feedType: "plan.pass.start" | "plan.pass.done" | "plan.review.start" | "plan.review.done",
+    target: string,
+    preview: string,
+    pass: number,
+  ) => {
+    if (isSharedNamespace) {
+      advancePhase(cwd, phase, agentName, feedType, target, preview, pass);
+      return;
     }
+    logFeedEvent(cwd, agentName, feedType, target, preview);
+  };
 
-    if (existingTasks.length > 0 && !prompt) {
-      const planRef = existingPlan.prompt
-        ? `"${store.getPlanLabel(existingPlan)}"`
-        : existingPlan.prd;
-      return result(`A plan already exists for ${planRef}.\n\nTo re-plan with a steering prompt:\n  pi_messenger({ action: "plan", prompt: "focus on..." })`, {
-        mode: "plan",
-        error: "plan_exists",
-        existingPrd: existingPlan.prd,
-      });
-    }
-
-    if (existingTasks.length > 0 && prompt) {
-      const liveWorkers = getLiveWorkers(cwd);
-      const inProgress = existingTasks.filter(t => t.status === "in_progress" || liveWorkers.has(t.id));
-      if (inProgress.length > 0) {
-        return result(`Cannot re-plan: ${inProgress.length} task(s) in progress (${inProgress.map(t => t.id).join(", ")}). Stop or complete them first.`, {
-          mode: "plan",
-          error: "tasks_in_progress",
-          inProgress: inProgress.map(t => t.id),
-        });
-      }
-      wipeTasks(cwd);
-    }
-
-    if (existingTasks.length === 0 && !prompt) {
-      const crewDir = store.getCrewDir(cwd);
-      try { fs.rmSync(crewDir, { recursive: true, force: true }); } catch {}
-    }
+  const planningActive = isPlanningActiveForNamespace();
+  if (planningActive) {
+    return result("Planning is already in progress.", { mode: "plan", error: "planning_active" });
   }
 
   let prdPath: string;
@@ -285,6 +374,62 @@ export async function execute(
   }
 
   const isPromptBased = prdPath === "(prompt)";
+  const requestedSourceKey = store.computePlanSourceKey(prdPath, isPromptBased ? prompt : undefined);
+
+  const existingPlan = store.getPlan(cwd);
+  if (existingPlan) {
+    const existingTasks = store.getTasks(cwd, crewNamespace);
+    const liveWorkers = getLiveWorkers(cwd);
+    const inProgress = existingTasks.filter(t => (
+      t.status === "in_progress" || t.status === "starting" || liveWorkers.has(namespacedTaskId(t.id, crewNamespace))
+    ));
+    const existingSourceKey = existingPlan.source_key ?? store.computePlanSourceKey(existingPlan.prd, existingPlan.prompt);
+    const sameSource = existingSourceKey === requestedSourceKey;
+
+    if (sameSource && existingTasks.length > 0 && !prompt) {
+      const planRef = existingPlan.prompt
+        ? `"${store.getPlanLabel(existingPlan)}"`
+        : existingPlan.prd;
+      return result(`A plan already exists for ${planRef}.
+
+To re-plan with a steering prompt:
+  pi_messenger({ action: "plan", prompt: "focus on..." })`, {
+        mode: "plan",
+        error: "plan_exists",
+        existingPrd: existingPlan.prd,
+        runId: existingPlan.run_id ?? "legacy",
+      });
+    }
+
+    if (sameSource && existingTasks.length > 0 && prompt) {
+      if (inProgress.length > 0) {
+        return result(`Cannot re-plan: ${inProgress.length} task(s) in progress (${inProgress.map(t => t.id).join(", ")}). Stop or complete them first.`, {
+          mode: "plan",
+          error: "tasks_in_progress",
+          inProgress: inProgress.map(t => t.id),
+        });
+      }
+      wipeTasks(cwd);
+    }
+
+    if (!sameSource) {
+      if (inProgress.length > 0) {
+        return result(`Cannot start a new run: ${inProgress.length} task(s) from run ${existingPlan.run_id ?? "legacy"} are still in progress (${inProgress.map(t => t.id).join(", ")}). Block, reset, or complete them first.`, {
+          mode: "plan",
+          error: "tasks_in_progress",
+          inProgress: inProgress.map(t => t.id),
+          existingRunId: existingPlan.run_id ?? "legacy",
+        });
+      }
+
+      const archivedRunId = store.archiveActiveRun(cwd, `new plan requested: ${requestedSourceKey}`);
+      logFeedEvent(cwd, agentName, "plan.archive", prdPath, `archived prior run ${archivedRunId ?? "legacy"}`);
+      notify(ctx, `Archived previous run ${archivedRunId ?? "legacy"} and started a fresh run for ${isPromptBased ? "prompt" : path.basename(prdPath)}`, "info");
+    } else if (existingTasks.length === 0 && !prompt) {
+      store.deletePlan(cwd);
+    }
+  }
+
 
   const availableAgents = discoverCrewAgents(cwd);
 
@@ -305,12 +450,14 @@ export async function execute(
     ? (prompt!.length > 60 ? prompt!.slice(0, 57) + "..." : prompt!)
     : prdPath;
 
-  store.createPlan(cwd, prdPath, isPromptBased ? prompt : undefined);
+  const activePlan = store.createPlan(cwd, prdPath, isPromptBased ? prompt : undefined, { sourceKey: requestedSourceKey });
   startRunInProgress(cwd, runLabel);
   if (prompt && !isPromptBased) injectSteeringPrompt(cwd, prompt);
-  startPlanningRun(cwd, maxPasses);
-  setPlanningPhase(cwd, "read-prd", 0);
-  logFeedEvent(cwd, agentName, "plan.start", prdPath, `max passes ${maxPasses}`);
+  if (isSharedNamespace) {
+    startPlanningRun(cwd, maxPasses);
+    setPlanningPhaseForNamespace("read-prd", 0);
+  }
+  logFeedEvent(cwd, agentName, "plan.start", prdPath, `run ${activePlan.run_id ?? "legacy"} • max passes ${maxPasses}`);
   notify(ctx, `Planning started: ${isPromptBased ? runLabel : path.basename(prdPath)} (${maxPasses} pass${maxPasses === 1 ? "" : "es"})`, "info");
   reportProgress();
 
@@ -322,7 +469,7 @@ export async function execute(
 
   for (let pass = 1; pass <= maxPasses; pass++) {
     const passPhase: PlanningPhase = pass === 1 ? "scan-code" : "gap-analysis";
-    advancePhase(cwd, passPhase, agentName, "plan.pass.start", prdPath, `pass ${pass}/${maxPasses}`, pass);
+    advancePhaseForNamespace(passPhase, "plan.pass.start", prdPath, `pass ${pass}/${maxPasses}`, pass);
     reportProgress();
     notify(ctx, `Planning pass ${pass}/${maxPasses} in progress`, "info");
 
@@ -334,16 +481,16 @@ export async function execute(
       agent: PLANNER_AGENT,
       task: plannerPrompt,
       modelOverride: config.models?.planner,
-      taskId: "__planner__",
+      taskId: plannerTaskId,
     }], cwd);
 
-    if (isPlanningCancelled()) {
+    if (planningCancelledForNamespace()) {
       return result("Planning cancelled.", { mode: "plan", error: "cancelled" });
     }
 
     if (plannerResult.exitCode !== 0) {
       if (pass === 1) {
-        finishPlanningRun(cwd, "failed", pass);
+        finishPlanningRunForNamespace("failed", pass);
         reportProgress();
         logFeedEvent(cwd, agentName, "plan.failed", prdPath, `pass ${pass} failed`);
         notify(ctx, "Planning failed on pass 1. No tasks were created.", "error");
@@ -364,13 +511,13 @@ export async function execute(
     lastPlannerOutput = plannerResult.output;
     passesCompleted = pass;
     appendPassToProgress(cwd, pass, lastPlannerOutput);
-    advancePhase(cwd, "build-task-graph", agentName, "plan.pass.done", prdPath, `pass ${pass}/${maxPasses} complete`, pass);
+    advancePhaseForNamespace("build-task-graph", "plan.pass.done", prdPath, `pass ${pass}/${maxPasses} complete`, pass);
     reportProgress();
 
     if (pass >= maxPasses) break;
     if (!hasReviewer) break;
 
-    advancePhase(cwd, "review-pass", agentName, "plan.review.start", prdPath, `review pass ${pass}`, pass);
+    advancePhaseForNamespace("review-pass", "plan.review.start", prdPath, `review pass ${pass}`, pass);
     reportProgress();
     notify(ctx, `Reviewing planning pass ${pass}/${maxPasses}`, "info");
 
@@ -387,16 +534,16 @@ export async function execute(
       agent: "crew-reviewer",
       task: reviewPrompt,
       modelOverride: config.models?.reviewer,
-      taskId: "__reviewer__",
+      taskId: reviewerTaskId,
     }], cwd);
 
-    if (isPlanningCancelled()) {
+    if (planningCancelledForNamespace()) {
       return result("Planning cancelled.", { mode: "plan", error: "cancelled" });
     }
 
     if (reviewResult.exitCode !== 0) {
       logFeedEvent(cwd, agentName, "plan.review.done", prdPath, `review pass ${pass} failed`);
-      setPlanningPhase(cwd, "build-steps", pass);
+      setPlanningPhaseForNamespace("build-steps", pass);
       reportProgress();
       notify(ctx, `Review failed on pass ${pass}; continuing with planner output.`, "warning");
       break;
@@ -405,13 +552,13 @@ export async function execute(
     lastVerdict = parseVerdict(reviewResult.output);
     lastReviewOutput = reviewResult.output;
     appendReviewToProgress(cwd, pass, lastVerdict.verdict, reviewResult.output);
-    advancePhase(cwd, "build-steps", agentName, "plan.review.done", prdPath, `review ${pass}: ${lastVerdict.verdict}`, pass);
+    advancePhaseForNamespace("build-steps", "plan.review.done", prdPath, `review ${pass}: ${lastVerdict.verdict}`, pass);
     reportProgress();
 
     if (lastVerdict.verdict === "SHIP") break;
   }
 
-  setPlanningPhase(cwd, "build-steps", passesCompleted);
+  setPlanningPhaseForNamespace("build-steps", passesCompleted);
   reportProgress();
 
   const tasks = parseJsonTaskBlock(lastPlannerOutput) ?? parseTasksFromOutput(lastPlannerOutput);
@@ -423,7 +570,7 @@ export async function execute(
 
   if (tasks.length === 0) {
     store.setPlanSpec(cwd, lastPlannerOutput);
-    finishPlanningRun(cwd, "failed", passesCompleted);
+    finishPlanningRunForNamespace("failed", passesCompleted);
     reportProgress();
     logFeedEvent(cwd, agentName, "plan.failed", prdPath, "no tasks parsed");
     notify(ctx, "Planning finished but no tasks could be parsed. Review plan.md.", "warning");
@@ -440,7 +587,7 @@ export async function execute(
 
   for (let i = 0; i < tasks.length; i++) {
     const task = tasks[i];
-    const created = store.createTask(cwd, task.title, task.description);
+    const created = store.createTask(cwd, task.title, task.description, undefined, crewNamespace);
     createdTasks.push({ id: created.id, title: task.title, dependsOn: task.dependsOn });
     titleToId.set(task.title.toLowerCase(), created.id);
     titleToId.set(`task ${i + 1}`, created.id);
@@ -493,11 +640,11 @@ export async function execute(
   const planningBlock = planningSummary ? `${planningSummary}\n` : "";
   const warningBlock = warningLine ? `${warningLine}\n` : "";
 
-  setPlanningPhase(cwd, "finalizing", passesCompleted);
+  setPlanningPhaseForNamespace("finalizing", passesCompleted);
   reportProgress();
 
   const successLabel = isPromptBased ? `"${runLabel}"` : `**${prdPath}**`;
-  const shouldAutoWork = params.autoWork !== false;
+  const shouldAutoWork = isSharedNamespace && params.autoWork !== false;
   const nextSteps = shouldAutoWork
     ? `Workers will start automatically.`
     : `**Next steps:**
@@ -514,7 +661,7 @@ ${taskList}
 
 ${nextSteps}`;
 
-  finishPlanningRun(cwd, "completed", passesCompleted);
+  finishPlanningRunForNamespace("completed", passesCompleted);
   reportProgress();
   logFeedEvent(cwd, agentName, "plan.done", prdPath, `${createdTasks.length} tasks created`);
   if (warningLine) {

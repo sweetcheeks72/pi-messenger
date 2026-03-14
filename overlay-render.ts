@@ -35,6 +35,7 @@ import {
 } from "./crew/state.js";
 import type { Task } from "./crew/types.js";
 import { getLiveWorkers, type LiveWorkerInfo } from "./crew/live-progress.js";
+import { hasActiveWorker } from "./crew/registry.js";
 import type { ToolEntry } from "./crew/utils/progress.js";
 import { formatFeedLine as sharedFormatFeedLine, type FeedEvent } from "./feed.js";
 import { discoverCrewAgents } from "./crew/utils/discover.js";
@@ -43,6 +44,13 @@ import { loadCrewConfig } from "./crew/utils/config.js";
 import { listCheckpoints, getCheckpointDiff } from "./crew/utils/checkpoint.js";
 import { getLobbyWorkerCount } from "./crew/lobby.js";
 import type { CrewViewState } from "./overlay-actions.js";
+import type { MonitorRegistry } from "./src/monitor/registry.js";
+import { renderGroupedSessions } from "./src/monitor/ui/render.js";
+import { renderSessionDetailView } from "./src/monitor/ui/session-detail.js";
+import { deriveAttentionItems } from "./src/monitor/attention/derivation.js";
+import type { AttentionItem } from "./src/monitor/types/attention.js";
+import type { HealthStatus } from "./src/monitor/health/types.js";
+
 
 const STATUS_ICONS: Record<string, string> = { done: "✓", in_progress: "●", todo: "○", blocked: "✗" };
 
@@ -490,6 +498,7 @@ export function renderLegend(
   viewState: CrewViewState,
   task: Task | null,
   scrollLocked?: boolean,
+  registry?: MonitorRegistry,
 ): string {
   // Scroll lock indicator prefix
   const scrollPrefix = scrollLocked ? theme.fg("warning", "📌 PINNED ") : "";
@@ -521,6 +530,26 @@ export function renderLegend(
     viewState.notification = null;
   }
 
+  if (viewState.mode === "monitor-detail") {
+    if (viewState.confirmAction?.type === "end-session") {
+      const text = renderConfirmBar(viewState.confirmAction.taskId, viewState.confirmAction.label, "end-session");
+      return truncateToWidth(theme.fg("warning", appendUniversalHints(text)), width);
+    }
+    const hints: string[] = [];
+    const sessions = registry?.store.list() ?? [];
+    const session = sessions[viewState.monitorSelectedIndex];
+    if (session) {
+      const liveWorkerBacked = Boolean(session.metadata.taskId) && hasActiveWorker(session.metadata.cwd, session.metadata.taskId);
+      if (!liveWorkerBacked) {
+        if (session.status === "active") hints.push("p:Pause");
+        else if (session.status === "paused") hints.push("p:Resume");
+      }
+      if (session.status !== "ended" && session.status !== "error") hints.push("e:End");
+    }
+    hints.push("i:Snapshot", "↑↓:Scroll", "Esc:Back");
+    return truncateToWidth(scrollPrefix + theme.fg("dim", appendUniversalHints(hints.join("  "))), width);
+  }
+
   if (viewState.mode === "detail" && task) {
     return truncateToWidth(scrollPrefix + theme.fg("dim", appendUniversalHints(renderDetailStatusBar(cwd, task))), width);
   }
@@ -536,7 +565,7 @@ export function renderLegend(
     );
   }
 
-  return truncateToWidth(scrollPrefix + theme.fg("dim", appendUniversalHints(`m:Chat  v:${coordHint(cwd)}  +/-:Wkrs  Esc:Close`)), width);
+  return truncateToWidth(scrollPrefix + theme.fg("dim", appendUniversalHints(`m:Monitor  @:Chat  v:${coordHint(cwd)}  +/-:Wkrs  Esc:Close`)), width);
 }
 
 export function renderDetailView(cwd: string, task: Task, width: number, height: number, viewState: CrewViewState): string[] {
@@ -755,7 +784,7 @@ function renderDetailStatusBar(cwd: string, task: Task): string {
       if (checkpoints.some(cp => cp.label === "pre")) hints.push("C:Restore");
     } catch { /* ignore */ }
   }
-  if (!isPlanningForCwd(cwd)) hints.push("m:Chat");
+  if (!isPlanningForCwd(cwd)) hints.push("m:Monitor");
   hints.push(`v:${coordHint(cwd)}`, "f:Feed", "+/-:Wkrs", "←→:Nav");
   return hints.join("  ");
 }
@@ -770,13 +799,14 @@ function renderListStatusBar(cwd: string, task: Task): string {
   if (task.status === "in_progress") hints.push("b:Block");
   if (task.status !== "in_progress" && !task.milestone) hints.push("p:Revise");
   if (!(task.status === "in_progress" && hasLiveWorker(cwd, task.id))) hints.push("x:Del");
-  if (!isPlanningForCwd(cwd)) hints.push("m:Chat");
+  if (!isPlanningForCwd(cwd)) hints.push("m:Monitor");
   hints.push(`v:${coordHint(cwd)}`, "f:Feed", "+/-:Wkrs");
   return hints.join("  ");
 }
 
-function renderConfirmBar(taskId: string, label: string, type: "reset" | "cascade-reset" | "delete" | "cancel-planning"): string {
+function renderConfirmBar(taskId: string, label: string, type: "reset" | "cascade-reset" | "delete" | "cancel-planning" | "end-session"): string {
   if (type === "cancel-planning") return "⚠ Cancel planning? [y] Confirm  [n] Cancel";
+  if (type === "end-session") return `⚠ End session "${label}"? [y] Confirm  [n] Cancel`;
   if (type === "reset") return `⚠ Reset ${taskId} \"${label}\"? [y] Confirm  [n] Cancel`;
   if (type === "cascade-reset") return `⚠ Cascade reset ${taskId} and dependents? [y] Confirm  [n] Cancel`;
   return `⚠ Delete ${taskId} \"${label}\"? [y] Confirm  [n] Cancel`;
@@ -818,6 +848,162 @@ function renderTaskLine(theme: Theme, task: Task, isSelected: boolean, width: nu
 
   if (task.milestone) suffix += `${suffix ? " " : ""}· milestone`;
   return truncateToWidth(`${select}${coloredIcon} ${task.id}  ${task.title}${theme.fg("dim", suffix)}`, width);
+}
+
+
+// ─── Attention queue helpers ──────────────────────────────────────────────────
+
+const ANSI_YELLOW = "\x1b[33m";
+const ANSI_BOLD_ATTN = "\x1b[1m";
+const ANSI_DIM_ATTN = "\x1b[2m";
+const ANSI_RESET_ATTN = "\x1b[0m";
+
+/**
+ * Build a health status map from sessions using lightweight heuristics.
+ * Pure function — no side effects, no external calls.
+ */
+export function buildHealthMapFromSessions(
+  sessions: Array<{
+    status: string;
+    metadata: { id: string; startedAt: string };
+    events: Array<{ timestamp: string }>;
+    metrics: { eventCount: number; errorCount: number };
+  }>,
+  now: number,
+): Map<string, HealthStatus> {
+  const map = new Map<string, HealthStatus>();
+  for (const s of sessions) {
+    if (s.status !== "active") {
+      map.set(s.metadata.id, "healthy");
+      continue;
+    }
+    let lastTs = Date.parse(s.metadata.startedAt);
+    for (const e of s.events) {
+      const t = Date.parse(e.timestamp);
+      if (Number.isFinite(t) && t > lastTs) lastTs = t;
+    }
+    const ageMs = Math.max(0, now - lastTs);
+    const errorRate =
+      s.metrics.eventCount > 0 ? s.metrics.errorCount / s.metrics.eventCount : 0;
+    if (ageMs >= 120_000) {
+      map.set(s.metadata.id, "critical");
+    } else if (ageMs >= 30_000 || errorRate >= 0.5) {
+      map.set(s.metadata.id, "degraded");
+    } else {
+      map.set(s.metadata.id, "healthy");
+    }
+  }
+  return map;
+}
+
+function attentionReasonLabel(reason: AttentionItem["reason"]): string {
+  switch (reason) {
+    case "waiting_on_human": return "waiting";
+    case "stuck": return "stuck";
+    case "degraded": return "degraded";
+    case "high_error_rate": return "high errors";
+    case "repeated_retries": return "repeated retries";
+    case "failed_recoverable": return "failed";
+    case "stale_running": return "stale";
+    default: return String(reason);
+  }
+}
+
+/**
+ * Render the attention queue section as an array of lines.
+ * Shown above the session list when sessions need operator attention.
+ */
+export function renderAttentionQueue(items: AttentionItem[], width: number): string[] {
+  if (items.length === 0) return [];
+  const lines: string[] = [];
+  lines.push(`${ANSI_BOLD_ATTN}${ANSI_YELLOW}⚠ Attention (${items.length})${ANSI_RESET_ATTN}`);
+  for (const item of items) {
+    const sessionId = item.sessionId.slice(0, 12);
+    const label = attentionReasonLabel(item.reason);
+    const maxMsg = Math.max(10, width - sessionId.length - label.length - 6);
+    const msg =
+      item.message.length > maxMsg
+        ? item.message.slice(0, maxMsg - 1) + "…"
+        : item.message;
+    lines.push(
+      `  ${sessionId}  ${ANSI_YELLOW}${label}${ANSI_RESET_ATTN}: ${msg}`,
+    );
+    const maxAction = Math.max(10, width - 6);
+    const action =
+      item.recommendedAction.length > maxAction
+        ? item.recommendedAction.slice(0, maxAction - 1) + "…"
+        : item.recommendedAction;
+    lines.push(`  ${ANSI_DIM_ATTN}→ ${action}${ANSI_RESET_ATTN}`);
+  }
+  lines.push("");
+  return lines;
+}
+
+export function renderMonitorView(
+  registry: MonitorRegistry | undefined,
+  width: number,
+  height: number,
+  viewState: CrewViewState,
+): string[] {
+  if (!registry) {
+    const lines: string[] = ["  No monitor registry available."];
+    while (lines.length < height) lines.push("");
+    return lines.slice(0, height);
+  }
+
+  const sessions = registry.store.list();
+  if (sessions.length === 0) {
+    const lines: string[] = ["  No active sessions."];
+    while (lines.length < height) lines.push("");
+    return lines.slice(0, height);
+  }
+
+  const clampedIndex = Math.max(0, Math.min(viewState.monitorSelectedIndex, sessions.length - 1));
+  viewState.monitorSelectedIndex = clampedIndex;
+
+  const now = Date.now();
+  const healthMap = buildHealthMapFromSessions(sessions, now);
+  const attentionItems = deriveAttentionItems(sessions, healthMap, new Map());
+  const attentionLines = renderAttentionQueue(attentionItems, width);
+
+  const sessionLines = renderGroupedSessions(sessions, clampedIndex, width);
+  const allLines = [...attentionLines, ...sessionLines];
+
+  const visible = allLines.slice(0, height);
+  while (visible.length < height) visible.push("");
+  return visible;
+}
+
+
+export function renderMonitorDetailView(
+  registry: MonitorRegistry | undefined,
+  width: number,
+  height: number,
+  viewState: CrewViewState,
+): string[] {
+  if (!registry) {
+    const lines: string[] = ["  No monitor registry available."];
+    while (lines.length < height) lines.push("");
+    return lines.slice(0, height);
+  }
+
+  const sessions = registry.store.list();
+  const session = sessions[viewState.monitorSelectedIndex];
+  if (!session) {
+    const lines: string[] = ["  Session not found."];
+    while (lines.length < height) lines.push("");
+    return lines.slice(0, height);
+  }
+
+  const snapshot = registry.healthMonitor.getSessionHealth(session.metadata.id);
+  const health = snapshot.state === "stuck"
+    ? "critical"
+    : snapshot.state === "degraded"
+      ? "degraded"
+      : "healthy";
+  const alert = registry.healthMonitor.getAlert(session.metadata.id);
+
+  return renderSessionDetailView(session, health, width, height, Date.now(), alert);
 }
 
 export function navigateTask(viewState: CrewViewState, direction: 1 | -1, taskCount: number): void {

@@ -1,11 +1,13 @@
 /**
  * Crew - Store Operations
  * 
- * Simplified PRD-based storage: plan.json + tasks/*.json
+ * Active-run storage: plan.json + tasks/*.json
+ * Archived runs: runs/<run_id>/...
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
 import type { Plan, Task, TaskEvidence } from "./types.js";
 import { allocateTaskId } from "./id-allocator.js";
@@ -13,6 +15,27 @@ import { allocateTaskId } from "./id-allocator.js";
 // =============================================================================
 // Directory Helpers
 // =============================================================================
+
+
+const SHARED_NAMESPACE = "shared";
+
+function normalizeNamespace(value?: string): string {
+  if (typeof value !== "string") return SHARED_NAMESPACE;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : SHARED_NAMESPACE;
+}
+
+function isTaskInNamespace(task: Task, namespace?: string): boolean {
+  const taskNamespace = task.namespace === undefined
+    ? SHARED_NAMESPACE
+    : normalizeNamespace(task.namespace);
+
+  if (namespace === undefined) return true;
+  const requested = normalizeNamespace(namespace);
+  return requested === SHARED_NAMESPACE
+    ? taskNamespace === SHARED_NAMESPACE
+    : taskNamespace === requested;
+}
 
 function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) {
@@ -30,6 +53,14 @@ function getTasksDir(cwd: string): string {
 
 function getBlocksDir(cwd: string): string {
   return path.join(getCrewDir(cwd), "blocks");
+}
+
+function getRunsDir(cwd: string): string {
+  return path.join(getCrewDir(cwd), "runs");
+}
+
+export function computePlanSourceKey(prdPath: string, prompt?: string): string {
+  return prompt ? `prompt:${prompt.trim()}` : `prd:${prdPath}`;
 }
 
 export function cleanupBlockFiles(cwd: string, taskId: string): void {
@@ -77,13 +108,23 @@ function writeText(filePath: string, content: string): void {
 // =============================================================================
 
 export function getPlan(cwd: string): Plan | null {
-  return readJson<Plan>(path.join(getCrewDir(cwd), "plan.json"));
+  const plan = readJson<Plan>(path.join(getCrewDir(cwd), "plan.json"));
+  if (!plan) return null;
+  return {
+    ...plan,
+    run_id: plan.run_id ?? "legacy",
+    source_key: plan.source_key ?? computePlanSourceKey(plan.prd, plan.prompt),
+  } as Plan;
 }
 
-export function createPlan(cwd: string, prdPath: string, prompt?: string): Plan {
+export function createPlan(cwd: string, prdPath: string, prompt?: string, options?: { runId?: string; sourceKey?: string }): Plan {
   const now = new Date().toISOString();
-  
+  const runId = options?.runId ?? randomUUID().slice(0, 12);
+  const sourceKey = options?.sourceKey ?? computePlanSourceKey(prdPath, prompt);
+
   const plan: Plan = {
+    run_id: runId,
+    source_key: sourceKey,
     prd: prdPath,
     ...(prompt ? { prompt } : {}),
     created_at: now,
@@ -117,39 +158,72 @@ export function updatePlan(cwd: string, updates: Partial<Plan>): Plan | null {
   return updated;
 }
 
+export function archiveActiveRun(cwd: string, reason?: string): string | null {
+  const plan = getPlan(cwd);
+  if (!plan) return null;
+
+  const runId = plan.run_id ?? randomUUID().slice(0, 12);
+  const crewDir = getCrewDir(cwd);
+  const runDir = path.join(getRunsDir(cwd), runId);
+  ensureDir(runDir);
+
+  const copyIfExists = (src: string, dest: string) => {
+    if (!fs.existsSync(src)) return;
+    ensureDir(path.dirname(dest));
+    const stat = fs.statSync(src);
+    if (stat.isDirectory()) {
+      fs.cpSync(src, dest, { recursive: true });
+    } else {
+      fs.copyFileSync(src, dest);
+    }
+  };
+
+  copyIfExists(path.join(crewDir, "plan.json"), path.join(runDir, "plan.json"));
+  copyIfExists(path.join(crewDir, "plan.md"), path.join(runDir, "plan.md"));
+  copyIfExists(path.join(crewDir, "tasks"), path.join(runDir, "tasks"));
+  copyIfExists(path.join(crewDir, "blocks"), path.join(runDir, "blocks"));
+  copyIfExists(path.join(crewDir, "artifacts"), path.join(runDir, "artifacts"));
+  copyIfExists(path.join(crewDir, "planning-progress.md"), path.join(runDir, "planning-progress.md"));
+  copyIfExists(path.join(crewDir, "planning-outline.md"), path.join(runDir, "planning-outline.md"));
+
+  writeJson(path.join(runDir, "manifest.json"), {
+    run_id: runId,
+    archived_at: new Date().toISOString(),
+    reason: reason ?? null,
+    prd: plan.prd,
+    prompt: plan.prompt ?? null,
+    source_key: plan.source_key ?? computePlanSourceKey(plan.prd, plan.prompt),
+    task_count: plan.task_count,
+    completed_count: plan.completed_count,
+  });
+
+  deletePlan(cwd);
+  return runId;
+}
+
 export function deletePlan(cwd: string): boolean {
-  const planPath = path.join(getCrewDir(cwd), "plan.json");
-  const planMdPath = path.join(getCrewDir(cwd), "plan.md");
+  const crewDir = getCrewDir(cwd);
+  const planPath = path.join(crewDir, "plan.json");
+  const planMdPath = path.join(crewDir, "plan.md");
+  const progressPath = path.join(crewDir, "planning-progress.md");
+  const outlinePath = path.join(crewDir, "planning-outline.md");
   const tasksDir = getTasksDir(cwd);
-  
+  const blocksDir = getBlocksDir(cwd);
+  const artifactsDir = path.join(crewDir, "artifacts");
+
   let deleted = false;
-  
-  // Delete plan.json
+
   if (fs.existsSync(planPath)) {
     fs.unlinkSync(planPath);
     deleted = true;
   }
-  
-  // Delete plan.md
-  if (fs.existsSync(planMdPath)) {
-    fs.unlinkSync(planMdPath);
-  }
-  
-  // Delete all task files
-  if (fs.existsSync(tasksDir)) {
-    for (const file of fs.readdirSync(tasksDir)) {
-      fs.unlinkSync(path.join(tasksDir, file));
-    }
-  }
+  if (fs.existsSync(planMdPath)) fs.unlinkSync(planMdPath);
+  if (fs.existsSync(progressPath)) fs.unlinkSync(progressPath);
+  if (fs.existsSync(outlinePath)) fs.unlinkSync(outlinePath);
+  if (fs.existsSync(tasksDir)) fs.rmSync(tasksDir, { recursive: true, force: true });
+  if (fs.existsSync(blocksDir)) fs.rmSync(blocksDir, { recursive: true, force: true });
+  if (fs.existsSync(artifactsDir)) fs.rmSync(artifactsDir, { recursive: true, force: true });
 
-  // Delete all block files
-  const blocksDir = getBlocksDir(cwd);
-  if (fs.existsSync(blocksDir)) {
-    for (const file of fs.readdirSync(blocksDir)) {
-      fs.unlinkSync(path.join(blocksDir, file));
-    }
-  }
-  
   return deleted;
 }
 
@@ -174,19 +248,25 @@ export function createTask(
   cwd: string,
   title: string,
   description?: string,
-  dependsOn?: string[]
+  dependsOn?: string[],
+  namespace?: string,
+  options?: { critical?: boolean },
 ): Task {
   const id = allocateTaskId(cwd);
   const now = new Date().toISOString();
+  const normalizedNamespace = normalizeNamespace(namespace);
 
   const task: Task = {
     id,
+    namespace: normalizedNamespace,
     title,
     status: "todo",
     depends_on: dependsOn ?? [],
     created_at: now,
     updated_at: now,
     attempt_count: 0,
+    spawn_failure_count: 0,
+    ...(options?.critical ? { critical: true } : {}),
   };
 
   writeJson(path.join(getTasksDir(cwd), `${id}.json`), task);
@@ -211,12 +291,23 @@ function normalizeTask(raw: Task): Task {
     ...raw,
     depends_on: Array.isArray(raw.depends_on) ? raw.depends_on : [],
     attempt_count: typeof raw.attempt_count === "number" ? raw.attempt_count : 0,
+    spawn_failure_count: typeof raw.spawn_failure_count === "number" ? raw.spawn_failure_count : 0,
   };
 }
 
-export function getTask(cwd: string, taskId: string): Task | null {
+/** Atomically increment the spawn_failure_count for a task (persisted to disk). */
+export function incrementSpawnFailureCount(cwd: string, taskId: string): void {
+  const task = getTask(cwd, taskId);
+  if (!task) return;
+  updateTask(cwd, taskId, { spawn_failure_count: (task.spawn_failure_count ?? 0) + 1 });
+}
+
+export function getTask(cwd: string, taskId: string, namespace?: string): Task | null {
   const raw = readJson<Task>(path.join(getTasksDir(cwd), `${taskId}.json`));
-  return raw ? normalizeTask(raw) : null;
+  if (!raw) return null;
+
+  const task = normalizeTask(raw);
+  return isTaskInNamespace(task, namespace) ? task : null;
 }
 
 export function updateTask(cwd: string, taskId: string, updates: Partial<Task>): Task | null {
@@ -233,7 +324,7 @@ export function updateTask(cwd: string, taskId: string, updates: Partial<Task>):
   return updated;
 }
 
-export function getTasks(cwd: string): Task[] {
+export function getTasks(cwd: string, namespace?: string): Task[] {
   const dir = getTasksDir(cwd);
   if (!fs.existsSync(dir)) return [];
 
@@ -241,7 +332,12 @@ export function getTasks(cwd: string): Task[] {
   for (const file of fs.readdirSync(dir)) {
     if (!file.endsWith(".json")) continue;
     const raw = readJson<Task>(path.join(dir, file));
-    if (raw) tasks.push(normalizeTask(raw));
+    if (raw) {
+      const task = normalizeTask(raw);
+      if (isTaskInNamespace(task, namespace)) {
+        tasks.push(task);
+      }
+    }
   }
 
   // Sort by ID number (task-1, task-2, ...)
@@ -348,15 +444,33 @@ export function completeTask(
   const task = getTask(cwd, taskId);
   if (!task || task.status !== "in_progress") return null;
 
+  return updateTask(cwd, taskId, {
+    status: "pending_review",
+    summary,
+    evidence,
+    head_commit: getBaseCommit(cwd),
+  });
+}
+
+export function transitionTaskToPendingIntegration(cwd: string, taskId: string): Task | null {
+  const task = getTask(cwd, taskId);
+  if (!task || task.status !== "pending_review") return null;
+
+  return updateTask(cwd, taskId, {
+    status: "pending_integration",
+  });
+}
+
+export function acceptTask(cwd: string, taskId: string): Task | null {
+  const task = getTask(cwd, taskId);
+  if (!task || (task.status !== "pending_review" && task.status !== "pending_integration")) return null;
+
   const updated = updateTask(cwd, taskId, {
     status: "done",
     completed_at: new Date().toISOString(),
-    summary,
-    evidence,
     assigned_to: undefined,
   });
 
-  // Update plan completed count
   if (updated) {
     const plan = getPlan(cwd);
     if (plan) {
@@ -365,8 +479,17 @@ export function completeTask(
   }
 
   autoCompleteMilestones(cwd);
-
   return updated;
+}
+
+export function rejectTaskReview(cwd: string, taskId: string): Task | null {
+  const task = getTask(cwd, taskId);
+  if (!task || task.status !== "pending_review") return null;
+
+  return updateTask(cwd, taskId, {
+    status: "todo",
+    assigned_to: undefined,
+  });
 }
 
 export function blockTask(cwd: string, taskId: string, reason: string): Task | null {
@@ -409,6 +532,7 @@ export function resetTask(cwd: string, taskId: string, cascade: boolean = false)
     started_at: undefined,
     completed_at: undefined,
     base_commit: undefined,
+    head_commit: undefined,
     assigned_to: undefined,
     summary: undefined,
     evidence: undefined,
@@ -446,8 +570,11 @@ export function resetTask(cwd: string, taskId: string, cascade: boolean = false)
 // Ready Tasks (Dependency Resolution)
 // =============================================================================
 
-export function getReadyTasks(cwd: string, options?: { advisory?: boolean }): Task[] {
-  const tasks = getTasks(cwd);
+export function getReadyTasks(
+  cwd: string,
+  options?: { advisory?: boolean; namespace?: string },
+): Task[] {
+  const tasks = getTasks(cwd, options?.namespace);
   if (options?.advisory) {
     return tasks.filter(t => t.status === "todo" && !t.milestone);
   }
