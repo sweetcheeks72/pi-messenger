@@ -41,6 +41,7 @@ import { formatFeedLine as sharedFormatFeedLine, type FeedEvent } from "./feed.j
 import { groupByThread, formatCollapseIndicator, formatReplyPrefix, shouldCollapse } from "./crew/thread-model.js";
 import { getReactions, formatReactionBadges, type ReactionMap } from "./crew/reactions.js";
 import { hasRichContent, renderRichContent } from "./crew/rich-content.js";
+import { getSuggestionQueue } from "./crew/suggestion-queue.js";
 import { discoverCrewAgents } from "./crew/utils/discover.js";
 import { loadConfig } from "./config.js";
 import { loadCrewConfig } from "./crew/utils/config.js";
@@ -154,6 +155,16 @@ export function renderStatusBar(theme: Theme, cwd: string, width: number): strin
   const coordLevel = crewConfig.coordination;
   base += ` │ ${crewConfig.dependencies} │ ${coordLevel}`;
 
+  // Suggestion queue badge (TASK-04)
+  try {
+    const pendingCount = getSuggestionQueue(cwd).getPendingCount();
+    if (pendingCount > 0) {
+      base += ` │ 📋 ${pendingCount} suggestion${pendingCount > 1 ? "s" : ""}`;
+    }
+  } catch {
+    // Silently skip if suggestion store unreadable
+  }
+
   if (!autonomousActive) {
     return truncateToWidth(base, width);
   }
@@ -210,7 +221,31 @@ export function renderWorkersSection(theme: Theme, cwd: string, width: number, m
     ];
     const pipeline = renderAgentPipeline(pipelineSteps);
 
-    const line = `⚡ ${info.name} ${formatTaskLabel(info.taskId)}  ${pipeline}  ${activity}  ${theme.fg("dim", `${elapsed}  ${tokens} tok${costDisplay}`)}${sparkline} ${modelBadge}`;
+    // Health state visual indicator
+    const healthState = info.healthState ?? "healthy";
+    let healthPrefix: string;
+    switch (healthState) {
+      case "degraded":
+        healthPrefix = "⚠";
+        break;
+      case "critical":
+        healthPrefix = "🔴";
+        break;
+      case "failed":
+        healthPrefix = "💀";
+        break;
+      default:
+        healthPrefix = "⚡";
+        break;
+    }
+    // Apply dim styling for degraded workers, error color for critical/failed
+    const nameDisplay = healthState === "degraded"
+      ? theme.fg("dim", info.name)
+      : healthState === "critical" || healthState === "failed"
+        ? theme.fg("error", info.name)
+        : info.name;
+
+    const line = `${healthPrefix} ${nameDisplay} ${formatTaskLabel(info.taskId)}  ${pipeline}  ${activity}  ${theme.fg("dim", `${elapsed}  ${tokens} tok${costDisplay}`)}${sparkline} ${modelBadge}`;
     lines.push(truncateToWidth(line, width));
   }
   return lines;

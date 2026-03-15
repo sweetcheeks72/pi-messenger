@@ -1,5 +1,6 @@
 import type { PiEvent } from "./utils/progress.js";
 import type { AgentProgress } from "./utils/progress.js";
+import type { HealthState } from "./health-bus.js";
 
 export interface LiveWorkerInfo {
   cwd: string;
@@ -8,6 +9,8 @@ export interface LiveWorkerInfo {
   name: string;
   progress: AgentProgress;
   startedAt: number;
+  /** Health state from AgentHealthBus / Φ detector. Optional — defaults to "healthy". */
+  healthState?: HealthState;
 }
 
 export interface WorkerRuntimeEvent {
@@ -145,6 +148,22 @@ export function updateLiveWorker(cwd: string, taskId: string, info: Omit<LiveWor
     ...info,
     cwd,
   });
+  notifyListeners();
+}
+
+
+/**
+ * Patch only the healthState field on an existing live worker.
+ * No-op if the worker is not currently tracked.
+ * Used by handleHeartbeat() to push HealthBus state without
+ * needing the full LiveWorkerInfo shape.
+ */
+export function patchLiveWorkerHealth(cwd: string, taskId: string, healthState: HealthState): void {
+  const key = getWorkerKey(cwd, taskId);
+  const existing = liveWorkers.get(key);
+  if (!existing) return;
+
+  liveWorkers.set(key, { ...existing, healthState });
   notifyListeners();
 }
 
