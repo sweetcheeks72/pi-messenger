@@ -34,6 +34,7 @@ import {
   buildHealthMapFromSessions,
   navigateTask,
 } from "./overlay-render.js";
+import { getReactions } from "./crew/reactions.js";
 import { deriveAttentionItems } from "./src/monitor/attention/derivation.js";
 import { renderReplayView } from "./overlay-render-replay.js";
 import {
@@ -757,7 +758,8 @@ export class MessengerOverlay implements Component, Focusable {
       }
 
       const displayEvents = allEvents.slice(-feedHeight);
-      let feedLines = renderFeedSection(this.theme, displayEvents, sectionW, prevTs);
+      const reactionMap = getReactions(this.cwd);
+      let feedLines = renderFeedSection(this.theme, displayEvents, sectionW, prevTs, reactionMap);
       if (feedLines.length > feedHeight) feedLines = feedLines.slice(-feedHeight);
 
       while (workerLines.length > 0 && workersHeight() + mainHeight + (feedLines.length > 0 ? feedLines.length + 1 : 0) + agentsHeight > contentHeight) {

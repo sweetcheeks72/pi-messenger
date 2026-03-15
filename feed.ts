@@ -64,6 +64,8 @@ export interface FeedEvent {
   threadId?: string;              // Thread identifier (root event ts)
   parentEventTs?: string;         // Timestamp of the parent event being replied to
   replyCount?: number;            // Number of replies in this thread (on root events)
+  // Rich content blocks (TASK-06)
+  richContent?: import("./crew/types.js").RichContent[];  // Structured content blocks
 }
 
 function feedPath(cwd: string): string {
@@ -248,3 +250,18 @@ export function logFeedEvent(
     preview,
   });
 }
+
+// =============================================================================
+// Reactions re-export (TASK-14)
+// =============================================================================
+
+export {
+  addReaction,
+  removeReaction,
+  getReactions,
+  getReactionsForEvent,
+  formatReactionBadges,
+  ALLOWED_EMOJI,
+  type ReactionMap,
+  type EmojiReactions,
+} from "./crew/reactions.js";

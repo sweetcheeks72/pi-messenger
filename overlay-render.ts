@@ -39,6 +39,8 @@ import { hasActiveWorker } from "./crew/registry.js";
 import type { ToolEntry } from "./crew/utils/progress.js";
 import { formatFeedLine as sharedFormatFeedLine, type FeedEvent } from "./feed.js";
 import { groupByThread, formatCollapseIndicator, formatReplyPrefix, shouldCollapse } from "./crew/thread-model.js";
+import { getReactions, formatReactionBadges, type ReactionMap } from "./crew/reactions.js";
+import { hasRichContent, renderRichContent } from "./crew/rich-content.js";
 import { discoverCrewAgents } from "./crew/utils/discover.js";
 import { loadConfig } from "./config.js";
 import { loadCrewConfig } from "./crew/utils/config.js";
@@ -271,7 +273,7 @@ export function renderTaskSummary(theme: Theme, cwd: string, width: number, heig
 
 const DIM_EVENTS = new Set(["join", "leave", "reserve", "release", "plan.pass.start", "plan.pass.done", "plan.review.start", "plan.review.done"]);
 
-export function renderFeedSection(theme: Theme, events: FeedEvent[], width: number, lastSeenTs: string | null): string[] {
+export function renderFeedSection(theme: Theme, events: FeedEvent[], width: number, lastSeenTs: string | null, reactionMap?: ReactionMap): string[] {
   if (events.length === 0) return [];
   const lines: string[] = [];
   let lastWasMessage = false;
@@ -296,13 +298,32 @@ export function renderFeedSection(theme: Theme, events: FeedEvent[], width: numb
         const indicator = formatCollapseIndicator(group.replyCount);
         msgLines[0] = truncateToWidth(`${msgLines[0]}  ${theme.fg("dim", indicator)}`, width);
       }
+      // Reaction badges (TASK-14)
+      if (reactionMap) {
+        const badges = formatReactionBadges(reactionMap[rootEvent.ts] ?? {});
+        if (badges) {
+          msgLines[0] = truncateToWidth(`${msgLines[0]}  ${badges}`, width);
+        }
+      }
       lines.push(...msgLines);
+      // Rich content blocks (TASK-06)
+      if (hasRichContent(rootEvent)) {
+        const richLines = renderRichContent(rootEvent.richContent!);
+        for (const rl of richLines) {
+          lines.push(truncateToWidth(`      ${rl}`, width));
+        }
+      }
     } else {
       const eventIcon = getEventIcon(rootEvent.type);
       let formatted = `${eventIcon} ${sharedFormatFeedLine(rootEvent)}`;
       if (group.replyCount > 0) {
         const indicator = formatCollapseIndicator(group.replyCount);
         formatted = `${formatted}  ${indicator}`;
+      }
+      // Reaction badges (TASK-14)
+      if (reactionMap) {
+        const badges = formatReactionBadges(reactionMap[rootEvent.ts] ?? {});
+        if (badges) formatted = `${formatted}  ${badges}`;
       }
       const dimmed = DIM_EVENTS.has(rootEvent.type) || !isNew;
       lines.push(truncateToWidth(dimmed ? theme.fg("dim", formatted) : formatted, width));
@@ -326,6 +347,13 @@ export function renderFeedSection(theme: Theme, events: FeedEvent[], width: numb
           // Indent continuation lines of wrapped messages
           for (let j = 1; j < replyLines.length; j++) {
             lines.push(truncateToWidth(`  │  ${replyLines[j]}`, width));
+          }
+          // Rich content in replies (TASK-06)
+          if (hasRichContent(reply)) {
+            const richLines = renderRichContent(reply.richContent!);
+            for (const rl of richLines) {
+              lines.push(truncateToWidth(`  │      ${rl}`, width));
+            }
           }
         } else {
           const eventIcon = getEventIcon(reply.type);
