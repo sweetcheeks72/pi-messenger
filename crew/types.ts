@@ -331,3 +331,48 @@ export const DEFAULT_THREAD_RENDER_OPTIONS: ThreadRenderOptions = {
   maxInlineReplies: 3,
   showReplyIndicators: true,
 };
+
+// =============================================================================
+// Rich Content Types (TASK-06)
+// =============================================================================
+
+/**
+ * Content type for rich message blocks within a FeedEvent.
+ * Supports structured rendering of code, diffs, file references, and tables.
+ */
+export type RichContentType = "text" | "code" | "diff" | "file" | "table";
+
+/**
+ * A single block of rich content attached to a FeedEvent.
+ * Multiple blocks can form a composite message (e.g., explanation + code + diff).
+ */
+export interface RichContent {
+  /** The type of content block */
+  type: RichContentType;
+  /** The raw content string */
+  content: string;
+  /** Programming language for code blocks (e.g., "typescript", "python") */
+  language?: string;
+  /** File path for file references and diff blocks */
+  filename?: string;
+  /** Whether this block should render collapsed by default */
+  collapsed?: boolean;
+}
+
+/**
+ * Options for rendering rich content blocks in the TUI overlay.
+ */
+export interface RichContentRenderOptions {
+  /** Maximum number of lines to show before collapsing (default: 10) */
+  maxVisibleLines: number;
+  /** Whether to show language labels on code blocks (default: true) */
+  showLanguageLabel: boolean;
+  /** Whether to colorize diff +/- lines (default: true) */
+  colorizeDiffs: boolean;
+}
+
+export const DEFAULT_RICH_CONTENT_RENDER_OPTIONS: RichContentRenderOptions = {
+  maxVisibleLines: 10,
+  showLanguageLabel: true,
+  colorizeDiffs: true,
+};
