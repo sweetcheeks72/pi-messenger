@@ -357,7 +357,9 @@ export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContex
     };
 
     try {
-      fs.writeFileSync(regPath, JSON.stringify(registration, null, 2));
+      const tmpPath = `${regPath}.tmp.${process.pid}`;
+      fs.writeFileSync(tmpPath, JSON.stringify(registration, null, 2));
+      fs.renameSync(tmpPath, regPath);
     } catch (err) {
       if (ctx.hasUI) {
         const msg = err instanceof Error ? err.message : "unknown error";
@@ -435,7 +437,9 @@ export function updateRegistration(state: MessengerState, dirs: Dirs, ctx: Exten
     reg.session = { ...state.session };
     reg.activity = { ...state.activity };
     reg.statusMessage = state.statusMessage;
-    fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
+    const tmpPath = `${regPath}.tmp.${process.pid}`;
+    fs.writeFileSync(tmpPath, JSON.stringify(reg, null, 2));
+    fs.renameSync(tmpPath, regPath);
   } catch {
     // Ignore errors
   }
@@ -455,7 +459,9 @@ export function flushActivityToRegistry(state: MessengerState, dirs: Dirs, ctx: 
     reg.session = { ...state.session };
     reg.activity = { ...state.activity };
     reg.statusMessage = state.statusMessage;
-    fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
+    const tmpPath = `${regPath}.tmp.${process.pid}`;
+    fs.writeFileSync(tmpPath, JSON.stringify(reg, null, 2));
+    fs.renameSync(tmpPath, regPath);
   } catch {
     // Ignore errors
   }
@@ -537,7 +543,9 @@ export function renameAgent(
   ensureDirSync(dirs.registry);
   
   try {
-    fs.writeFileSync(join(dirs.registry, `${newName}.json`), JSON.stringify(registration, null, 2));
+    const tmpPath = `${join(dirs.registry, `${newName}.json`)}.tmp.${process.pid}`;
+    fs.writeFileSync(tmpPath, JSON.stringify(registration, null, 2));
+    fs.renameSync(tmpPath, join(dirs.registry, `${newName}.json`));
   } catch (err) {
     return { success: false, error: "invalid_name" as const };
   }

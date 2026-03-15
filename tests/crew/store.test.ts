@@ -63,6 +63,19 @@ describe("crew/store", () => {
   });
 
   describe("task CRUD", () => {
+    it("createTask initializes spawn_failure_count to 0 and incrementSpawnFailureCount persists", () => {
+      store.createPlan(cwd, "docs/PRD.md");
+
+      const task = store.createTask(cwd, "Task one", "Description one");
+
+      expect(task.spawn_failure_count).toBe(0);
+      expect(store.getTask(cwd, task.id)?.spawn_failure_count).toBe(0);
+
+      store.incrementSpawnFailureCount(cwd, task.id);
+
+      expect(store.getTask(cwd, task.id)?.spawn_failure_count).toBe(1);
+    });
+
     it("createTask assigns sequential IDs and creates .json/.md files", () => {
       store.createPlan(cwd, "docs/PRD.md");
 
@@ -136,7 +149,7 @@ describe("crew/store", () => {
       expect(second).toBeNull();
     });
 
-    it("completeTask: in_progress -> done and updates plan completed_count", () => {
+    it("completeTask: in_progress -> pending_review and defers completed_count", () => {
       store.createPlan(cwd, "docs/PRD.md");
       const task = store.createTask(cwd, "Task one", "Desc one");
       store.startTask(cwd, task.id, "WorkerAlpha");
@@ -149,14 +162,78 @@ describe("crew/store", () => {
       );
 
       expect(completed).not.toBeNull();
-      expect(completed?.status).toBe("done");
+      expect(completed?.status).toBe("pending_review");
       expect(completed?.summary).toBe("Implemented feature");
       expect(completed?.evidence?.commits).toEqual(["abc123"]);
-      expect(completed?.assigned_to).toBeUndefined();
-      expect(completed?.completed_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(completed?.assigned_to).toBe("WorkerAlpha");
+      expect(completed?.completed_at).toBeUndefined();
 
       const plan = store.getPlan(cwd);
-      expect(plan?.completed_count).toBe(1);
+      expect(plan?.completed_count).toBe(0);
+    });
+
+    it("completeTask: writes head_commit to task data", () => {
+      store.createPlan(cwd, "docs/PRD.md");
+      const task = store.createTask(cwd, "Task one", "Desc one");
+      store.startTask(cwd, task.id, "WorkerAlpha");
+
+      const completed = store.completeTask(cwd, task.id, "Done", { commits: ["abc"] });
+
+      expect(completed).not.toBeNull();
+      // head_commit key should exist in the returned task object
+      // (value may be undefined if not in a git repo, but the field is written)
+      expect("head_commit" in (completed ?? {})).toBe(true);
+
+      // Disk round-trip: verify head_commit is persisted in the JSON file
+      // (value may be undefined in non-git environments — JSON strips undefined keys,
+      // so we compare the value directly rather than checking key presence)
+      const persisted = store.getTask(cwd, task.id);
+      expect(persisted).not.toBeNull();
+      expect(persisted?.head_commit).toBe(completed?.head_commit);
+    });
+
+    it("resetTask: clears head_commit", () => {
+      store.createPlan(cwd, "docs/PRD.md");
+      const task = store.createTask(cwd, "Task one", "Desc one");
+      store.startTask(cwd, task.id, "WorkerAlpha");
+      store.completeTask(cwd, task.id, "Done");
+
+      const reset = store.resetTask(cwd, task.id);
+      expect(reset.length).toBe(1);
+      expect(reset[0].status).toBe("todo");
+      // head_commit should be cleared on reset
+      expect(reset[0].head_commit).toBeUndefined();
+
+      // Disk round-trip: verify head_commit is absent in the persisted JSON file
+      const persisted = store.getTask(cwd, task.id);
+      expect(persisted).not.toBeNull();
+      expect(persisted?.head_commit).toBeUndefined();
+    });
+
+    it("acceptTask marks task done and increments completed_count", () => {
+      store.createPlan(cwd, "docs/PRD.md");
+      const task = store.createTask(cwd, "Task one", "Desc one");
+      store.startTask(cwd, task.id, "WorkerAlpha");
+      store.completeTask(cwd, task.id, "Implemented feature", { commits: ["abc123"], tests: ["npm test"] });
+      store.transitionTaskToPendingIntegration(cwd, task.id);
+
+      const accepted = store.acceptTask(cwd, task.id);
+
+      expect(accepted?.status).toBe("done");
+      expect(accepted?.completed_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(store.getPlan(cwd)?.completed_count).toBe(1);
+    });
+
+    it("rejectTaskReview sends task back to todo", () => {
+      store.createPlan(cwd, "docs/PRD.md");
+      const task = store.createTask(cwd, "Task one", "Desc one");
+      store.startTask(cwd, task.id, "WorkerAlpha");
+      store.completeTask(cwd, task.id, "Implemented feature", { commits: ["abc123"], tests: ["npm test"] });
+
+      const rejected = store.rejectTaskReview(cwd, task.id);
+
+      expect(rejected?.status).toBe("todo");
+      expect(rejected?.assigned_to).toBeUndefined();
     });
 
     it("completeTask on non-in_progress task returns null", () => {
@@ -246,10 +323,13 @@ describe("crew/store", () => {
 
       store.startTask(cwd, t1.id, "WorkerA");
       store.completeTask(cwd, t1.id, "Done 1");
+      store.acceptTask(cwd, t1.id);
       store.startTask(cwd, t2.id, "WorkerB");
       store.completeTask(cwd, t2.id, "Done 2");
+      store.acceptTask(cwd, t2.id);
       store.startTask(cwd, t3.id, "WorkerC");
       store.completeTask(cwd, t3.id, "Done 3");
+      store.acceptTask(cwd, t3.id);
 
       expect(store.getPlan(cwd)?.completed_count).toBe(3);
 
@@ -290,6 +370,7 @@ describe("crew/store", () => {
 
       store.startTask(cwd, t1.id, "WorkerA");
       store.completeTask(cwd, t1.id, "Done");
+      store.acceptTask(cwd, t1.id);
 
       const ready = store.getReadyTasks(cwd).map(t => t.id);
       expect(ready).toContain(t2.id);
@@ -508,6 +589,7 @@ describe("crew/store", () => {
 
       store.startTask(cwd, t1.id, "WorkerA");
       store.completeTask(cwd, t1.id, "Done");
+      store.acceptTask(cwd, t1.id);
       expect(store.getPlan(cwd)?.task_count).toBe(2);
       expect(store.getPlan(cwd)?.completed_count).toBe(1);
 

@@ -784,16 +784,24 @@ export function executeSetStatus(
 export function executeFeed(
   cwd: string,
   limit?: number,
-  crewEventsInFeed: boolean = true
+  crewEventsInFeed: boolean = true,
+  filter?: string
 ) {
   const effectiveLimit = limit ?? 20;
   let events: FeedEvent[];
-  if (!crewEventsInFeed) {
+  // When a filter is explicitly provided, skip the crewEventsInFeed stripping:
+  // an explicit filter expresses intent to see those events regardless of the
+  // default-hide setting (e.g. filter:'task.escalate' + crewEventsInFeed=false
+  // should still return matching escalate events, not an empty list).
+  if (!crewEventsInFeed && !filter) {
     events = readFeedEvents(cwd, effectiveLimit * 2);
     events = events.filter(e => !isCrewEvent(e.type));
     events = events.slice(-effectiveLimit);
   } else {
     events = readFeedEvents(cwd, effectiveLimit);
+  }
+  if (filter) {
+    events = events.filter(e => e.type === filter);
   }
 
   if (events.length === 0) {

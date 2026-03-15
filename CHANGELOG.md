@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Orchestrator no longer crashes when worker launch fails with `ENOENT` or another spawn error. Task
+  workers now register an `error` handler plus dedicated launch-failure recovery that writes
+  diagnostics, persists spawn-failure metadata, increments `spawn_failure_count`, and resets the
+  preassigned task back to `todo` when appropriate. Lobby workers also register an `error` handler,
+  log diagnostics, and increment/log assigned-task spawn failures instead of crashing the process.
+
+### Added
+- `work.executable` crew config option: override the executable used to spawn workers. Resolution
+  order is `PI_CREW_EXECUTABLE` → `work.executable` → `which pi` → `pi`.
+- `PI_CREW_EXECUTABLE` environment variable: highest-priority per-invocation override for the worker
+  executable without editing config files.
+
 ## [0.12.1] - 2026-02-22
 
 ### Fixed

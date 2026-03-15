@@ -25,6 +25,9 @@ export type FeedEventType =
   | "task.split"
   | "task.revise"
   | "task.revise-tree"
+  | "task.progress"
+  | "task.escalate"
+  | "task.heartbeat"
   | "plan.start"
   | "plan.pass.start"
   | "plan.pass.done"
@@ -33,7 +36,17 @@ export type FeedEventType =
   | "plan.done"
   | "plan.cancel"
   | "plan.failed"
-  | "stuck";
+  | "plan.archive"
+  | "stuck"
+  | "health"
+  | "heartbeat.stale"
+  | "question.ask"
+  | "question.answer"
+  | "smoke.start"
+  | "smoke.pass"
+  | "smoke.fail"
+  | "smoke.error"
+  | "smoke.skip";
 
 export interface FeedEvent {
   ts: string;
@@ -41,6 +54,18 @@ export interface FeedEvent {
   type: FeedEventType;
   target?: string;
   preview?: string;
+  // Structured progress payload (task.progress)
+  progress?: { percentage: number; detail: string; phase?: string };
+  // Escalation payload (task.escalate)
+  escalation?: { reason: string; severity: "warn" | "block" | "critical"; suggestion?: string };
+  // Heartbeat payload (task.heartbeat)
+  heartbeat?: { taskId: string; status: string };
+  // Thread model fields (TASK-05)
+  threadId?: string;              // Thread identifier (root event ts)
+  parentEventTs?: string;         // Timestamp of the parent event being replied to
+  replyCount?: number;            // Number of replies in this thread (on root events)
+  // Rich content blocks (TASK-06)
+  richContent?: import("./crew/types.js").RichContent[];  // Structured content blocks
 }
 
 function feedPath(cwd: string): string {
@@ -108,6 +133,9 @@ const CREW_EVENT_TYPES = new Set<FeedEventType>([
   "task.split",
   "task.revise",
   "task.revise-tree",
+  "task.progress",
+  "task.escalate",
+  "task.heartbeat",
   "plan.start",
   "plan.pass.start",
   "plan.pass.done",
@@ -116,6 +144,13 @@ const CREW_EVENT_TYPES = new Set<FeedEventType>([
   "plan.done",
   "plan.cancel",
   "plan.failed",
+  "health",
+  "heartbeat.stale",
+  "smoke.start",
+  "smoke.pass",
+  "smoke.fail",
+  "smoke.error",
+  "smoke.skip",
 ]);
 
 export function formatFeedLine(event: FeedEvent): string {
@@ -160,6 +195,27 @@ export function formatFeedLine(event: FeedEvent): string {
     case "task.split": line += withPreview(` split ${event.target ?? ""}`); break;
     case "task.revise": line += withPreview(` revised ${event.target ?? ""}`); break;
     case "task.revise-tree": line += withPreview(` revised ${event.target ?? ""} + dependents`); break;
+    case "task.progress": {
+      const pct = event.progress ? ` ${event.progress.percentage}%` : "";
+      const phase = event.progress?.phase ? ` [${event.progress.phase}]` : "";
+      const detail = event.progress?.detail ?? preview;
+      line += withPreview(` progress${pct}${phase} on ${event.target ?? ""}`);
+      if (!preview && detail) line += ` — ${detail}`;
+      break;
+    }
+    case "task.escalate": {
+      const sev = event.escalation?.severity ?? "warn";
+      const reason = event.escalation?.reason ?? preview;
+      line += ` 🚨 escalated ${event.target ?? ""} [${sev}]`;
+      if (reason) line += ` — ${reason}`;
+      break;
+    }
+    case "task.heartbeat": {
+      const status = event.heartbeat?.status ?? "active";
+      line += ` 💓 heartbeat ${event.target ?? ""} [${status}]`;
+      break;
+    }
+    case "heartbeat.stale": line += withPreview(` ⚠️ heartbeat stale: ${event.target ?? ""}`); break;
     case "plan.start": line += withPreview(" planning started"); break;
     case "plan.pass.start": line += withPreview(" planning pass started"); break;
     case "plan.pass.done": line += withPreview(" planning pass finished"); break;
@@ -169,6 +225,7 @@ export function formatFeedLine(event: FeedEvent): string {
     case "plan.cancel": line += " planning cancelled"; break;
     case "plan.failed": line += withPreview(" planning failed"); break;
     case "stuck": line += " appears stuck"; break;
+    case "health": line += withPreview(` health alert: ${event.target ?? ""}`); break;
     default: line += ` ${event.type}`; break;
   }
   return line;
@@ -193,3 +250,18 @@ export function logFeedEvent(
     preview,
   });
 }
+
+// =============================================================================
+// Reactions re-export (TASK-14)
+// =============================================================================
+
+export {
+  addReaction,
+  removeReaction,
+  getReactions,
+  getReactionsForEvent,
+  formatReactionBadges,
+  ALLOWED_EMOJI,
+  type ReactionMap,
+  type EmojiReactions,
+} from "./crew/reactions.js";

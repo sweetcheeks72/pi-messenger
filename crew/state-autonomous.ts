@@ -25,6 +25,9 @@ export interface AutonomousState {
   stopReason: "completed" | "blocked" | "manual" | null;
   concurrency: number;
   autoOverlayPending: boolean;
+  namespace?: string;
+  consecutiveEmptyWaves: number;
+  maxConsecutiveEmptyWaves: number;
 }
 
 export const autonomousState: AutonomousState = {
@@ -37,6 +40,9 @@ export const autonomousState: AutonomousState = {
   stopReason: null,
   concurrency: 2,
   autoOverlayPending: false,
+  namespace: undefined,
+  consecutiveEmptyWaves: 0,
+  maxConsecutiveEmptyWaves: 3,
 };
 
 export const MIN_CONCURRENCY = 1;
@@ -69,7 +75,7 @@ export function waitForConcurrencyChange(): Promise<void> {
   });
 }
 
-export function startAutonomous(cwd: string, concurrency: number): void {
+export function startAutonomous(cwd: string, concurrency: number, namespace?: string): void {
   autonomousState.active = true;
   autonomousState.cwd = normalizeCwd(cwd);
   autonomousState.waveNumber = 1;
@@ -79,6 +85,8 @@ export function startAutonomous(cwd: string, concurrency: number): void {
   autonomousState.stopReason = null;
   autonomousState.concurrency = clampConcurrency(concurrency);
   autonomousState.autoOverlayPending = true;
+  autonomousState.namespace = namespace;
+  autonomousState.consecutiveEmptyWaves = 0;
 }
 
 export function stopAutonomous(reason: "completed" | "blocked" | "manual"): void {

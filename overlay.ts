@@ -5,6 +5,8 @@
 import type { Component, Focusable, TUI } from "@mariozechner/pi-tui";
 import { matchesKey, visibleWidth } from "@mariozechner/pi-tui";
 import type { Theme } from "@mariozechner/pi-coding-agent";
+import type { MonitorRegistry } from "./src/monitor/registry.js";
+import { AttentionQueuePanel } from "./src/monitor/ui/attention.js";
 import {
   extractFolder,
   formatDuration,
@@ -14,7 +16,7 @@ import {
 import * as crewStore from "./crew/store.js";
 import { adjustConcurrency, autonomousState, isAutonomousForCwd, isPlanningForCwd, planningState } from "./crew/state.js";
 import { loadCrewConfig, cycleCoordinationLevel, setCoordinationOverride } from "./crew/utils/config.js";
-import { readFeedEvents, type FeedEvent, type FeedEventType } from "./feed.js";
+import { readFeedEvents, logFeedEvent, type FeedEvent, type FeedEventType } from "./feed.js";
 import type { Task } from "./crew/types.js";
 import {
   renderStatusBar,
@@ -27,8 +29,14 @@ import {
   renderEmptyState,
   renderPlanningState,
   renderDetailView,
+  renderMonitorView,
+  renderMonitorDetailView,
+  buildHealthMapFromSessions,
   navigateTask,
 } from "./overlay-render.js";
+import { getReactions } from "./crew/reactions.js";
+import { deriveAttentionItems } from "./src/monitor/attention/derivation.js";
+import { renderReplayView } from "./overlay-render-replay.js";
 import {
   createCrewViewState,
   handleConfirmInput,
@@ -36,11 +44,14 @@ import {
   handleMessageInput,
   handleRevisePromptInput,
   handleCrewKeyBinding,
+  handleMonitorDetailKeyBinding,
   setNotification,
   type CrewViewState,
 } from "./overlay-actions.js";
 import { getLiveWorkers, hasLiveWorkers, onLiveWorkersChanged } from "./crew/live-progress.js";
 import { loadConfig } from "./config.js";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { discoverCrewAgents } from "./crew/utils/discover.js";
 import { spawnSingleWorker, spawnWorkersForReadyTasks } from "./crew/spawn.js";
 import { spawnLobbyWorker, removeLobbyWorkerByIndex, cleanupUnassignedAliveFiles } from "./crew/lobby.js";
@@ -66,6 +77,13 @@ export class MessengerOverlay implements Component, Focusable {
   private completionDismissed = false;
   private wasPlanning: boolean;
   private prevInProgressCount = 0;
+  private registry: MonitorRegistry | undefined;
+  private healthAlertUnsubscribe: (() => void) | null = null;
+  /** Whether the overlay is showing the replay view within monitor-detail */
+  private replayMode = false;
+  /** Scroll offset for the replay timeline view */
+  private replayScroll = 0;
+  private attentionPanel: AttentionQueuePanel | undefined;
 
   constructor(
     private tui: TUI,
@@ -74,8 +92,33 @@ export class MessengerOverlay implements Component, Focusable {
     private dirs: Dirs,
     private done: (snapshot?: string) => void,
     private callbacks: OverlayCallbacks,
+    registry?: MonitorRegistry,
   ) {
     this.cwd = process.cwd();
+    this.registry = registry;
+    if (registry) {
+      this.healthAlertUnsubscribe = registry.healthMonitor.onAlert((alert) => {
+        const statusLabel = alert.status === "critical" ? "🔴" : "🟡";
+        const message = `${statusLabel} Session ${alert.sessionId.slice(0, 8)} ${alert.status}: ${alert.reason}`;
+        logFeedEvent(this.cwd, "monitor", "health", alert.sessionId, alert.reason);
+        setNotification(this.crewViewState, this.tui, alert.status === "critical", message);
+        this.tui.requestRender();
+      });
+
+      this.attentionPanel = new AttentionQueuePanel();
+      this.attentionPanel.onSelect((item) => {
+        if (!this.registry) return;
+        const sessions = this.registry.store.list();
+        const idx = sessions.findIndex((s) => s.metadata.id === item.sessionId);
+        if (idx >= 0) {
+          this.crewViewState.monitorSelectedIndex = idx;
+          this.crewViewState.mode = "monitor-detail";
+          this.crewViewState.monitorDetailScroll = 0;
+          this.tui.requestRender();
+        }
+      });
+    }
+
     const cfg = loadConfig(this.cwd);
     this.stuckThresholdMs = cfg.stuckThreshold * 1000;
 
@@ -216,7 +259,7 @@ export class MessengerOverlay implements Component, Focusable {
     }
   }
 
-  handleInput(data: string): void {
+  handleInput(data: string): boolean | void {
     this.cancelCompletionTimer();
 
     if (data === "\x14") {
@@ -230,7 +273,7 @@ export class MessengerOverlay implements Component, Focusable {
     }
 
     if (this.crewViewState.confirmAction) {
-      handleConfirmInput(data, this.crewViewState, this.cwd, this.state.agentName, this.tui);
+      handleConfirmInput(data, this.crewViewState, this.cwd, this.state.agentName, this.tui, this.registry);
       return;
     }
 
@@ -254,7 +297,14 @@ export class MessengerOverlay implements Component, Focusable {
     }
 
     if (matchesKey(data, "escape")) {
-      if (this.crewViewState.mode === "detail") {
+      if (this.replayMode) {
+        this.replayMode = false;
+        this.replayScroll = 0;
+        this.tui.requestRender();
+      } else if (this.crewViewState.mode === "monitor-detail") {
+        this.crewViewState.mode = "monitor";
+        this.tui.requestRender();
+      } else if (this.crewViewState.mode === "detail" || this.crewViewState.mode === "monitor") {
         this.crewViewState.mode = "list";
         this.tui.requestRender();
       } else {
@@ -292,14 +342,25 @@ export class MessengerOverlay implements Component, Focusable {
       return;
     }
 
-    if (data === "@" || matchesKey(data, "m")) {
+    if (matchesKey(data, "m")) {
+      if (this.crewViewState.mode === "monitor" || this.crewViewState.mode === "monitor-detail") {
+        this.crewViewState.mode = "list";
+      } else {
+        this.crewViewState.mode = "monitor";
+        this.crewViewState.monitorSelectedIndex = 0;
+      }
+      this.tui.requestRender();
+      return;
+    }
+
+    if (data === "@") {
       if (isPlanningForCwd(this.cwd)) {
         setNotification(this.crewViewState, this.tui, false, "Chat unavailable during planning");
         this.tui.requestRender();
         return;
       }
       this.crewViewState.inputMode = "message";
-      this.crewViewState.messageInput = data === "@" ? "@" : "";
+      this.crewViewState.messageInput = "@";
       this.tui.requestRender();
       return;
     }
@@ -358,6 +419,14 @@ export class MessengerOverlay implements Component, Focusable {
         this.crewViewState.detailScroll = Math.max(0, this.crewViewState.detailScroll - 1);
         this.crewViewState.detailAutoScroll = false;
         this.crewViewState.scrollLocked = true;
+      } else if (this.crewViewState.mode === "monitor") {
+        this.crewViewState.monitorSelectedIndex = Math.max(0, this.crewViewState.monitorSelectedIndex - 1);
+      } else if (this.crewViewState.mode === "monitor-detail") {
+        if (this.replayMode) {
+          this.replayScroll = Math.max(0, this.replayScroll - 1);
+        } else {
+          this.crewViewState.monitorDetailScroll = Math.max(0, this.crewViewState.monitorDetailScroll - 1);
+        }
       } else {
         navigateTask(this.crewViewState, -1, tasks.length);
       }
@@ -370,6 +439,14 @@ export class MessengerOverlay implements Component, Focusable {
         this.crewViewState.detailScroll++;
         this.crewViewState.detailAutoScroll = false;
         // Don't set scrollLocked on down — user might be scrolling to bottom
+      } else if (this.crewViewState.mode === "monitor") {
+        this.crewViewState.monitorSelectedIndex++;
+      } else if (this.crewViewState.mode === "monitor-detail") {
+        if (this.replayMode) {
+          this.replayScroll++;
+        } else {
+          this.crewViewState.monitorDetailScroll++;
+        }
       } else {
         navigateTask(this.crewViewState, 1, tasks.length);
       }
@@ -400,7 +477,15 @@ export class MessengerOverlay implements Component, Focusable {
     }
 
     if (matchesKey(data, "enter")) {
-      if (task && this.crewViewState.mode !== "detail") {
+      if (this.crewViewState.mode === "monitor") {
+        if (this.attentionPanel && this.attentionPanel.getSelectedItem()) {
+          this.attentionPanel.handleInput("\r");
+          return true;
+        }
+        this.crewViewState.mode = "monitor-detail";
+        this.crewViewState.monitorDetailScroll = 0;
+        this.tui.requestRender();
+      } else if (task && this.crewViewState.mode !== "detail") {
         this.crewViewState.mode = "detail";
         this.crewViewState.detailScroll = 0;
         this.crewViewState.detailAutoScroll = true;
@@ -425,6 +510,21 @@ export class MessengerOverlay implements Component, Focusable {
         this.tui.requestRender();
         return;
       }
+    }
+
+    if (this.crewViewState.mode === "monitor-detail") {
+      if (!this.replayMode) {
+        if (matchesKey(data, "x")) {
+          this.handleSessionExport();
+          return;
+        }
+        if (matchesKey(data, "r")) {
+          this.handleSessionReplay();
+          return;
+        }
+      }
+      handleMonitorDetailKeyBinding(data, this.crewViewState, this.registry, this.tui);
+      return;
     }
 
     if (task) {
@@ -597,7 +697,22 @@ export class MessengerOverlay implements Component, Focusable {
     this.checkCompletion(tasks, planning);
 
     let contentLines: string[];
-    if (this.crewViewState.mode === "detail" && selectedTask) {
+    if (this.crewViewState.mode === "monitor-detail" && this.replayMode && this.registry) {
+      const sessions = this.registry.store.list();
+      const session = sessions[this.crewViewState.monitorSelectedIndex];
+      const sessionId = session?.metadata.id ?? "";
+      contentLines = renderReplayView(this.registry, sessionId, sectionW, contentHeight, this.replayScroll);
+    } else if (this.crewViewState.mode === "monitor-detail") {
+      contentLines = renderMonitorDetailView(this.registry, sectionW, contentHeight, this.crewViewState);
+    } else if (this.crewViewState.mode === "monitor") {
+      if (this.attentionPanel && this.registry) {
+        const sessions = this.registry.store.list();
+        const now = Date.now();
+        const healthMap = buildHealthMapFromSessions(sessions, now);
+        this.attentionPanel.setItems(deriveAttentionItems(sessions, healthMap, new Map(), now));
+      }
+      contentLines = renderMonitorView(this.registry, sectionW, contentHeight, this.crewViewState);
+    } else if (this.crewViewState.mode === "detail" && selectedTask) {
       contentLines = renderDetailView(this.cwd, selectedTask, sectionW, contentHeight, this.crewViewState);
     } else {
       const workersLimit = termRows <= 26 ? 2 : 5;
@@ -643,7 +758,8 @@ export class MessengerOverlay implements Component, Focusable {
       }
 
       const displayEvents = allEvents.slice(-feedHeight);
-      let feedLines = renderFeedSection(this.theme, displayEvents, sectionW, prevTs);
+      const reactionMap = getReactions(this.cwd);
+      let feedLines = renderFeedSection(this.theme, displayEvents, sectionW, prevTs, reactionMap);
       if (feedLines.length > feedHeight) feedLines = feedLines.slice(-feedHeight);
 
       while (workerLines.length > 0 && workersHeight() + mainHeight + (feedLines.length > 0 ? feedLines.length + 1 : 0) + agentsHeight > contentHeight) {
@@ -691,7 +807,7 @@ export class MessengerOverlay implements Component, Focusable {
     }
 
     lines.push(border("├" + "─".repeat(innerW) + "┤"));
-    lines.push(row(renderLegend(this.theme, this.cwd, sectionW, this.crewViewState, selectedTask, this.crewViewState.scrollLocked)));
+    lines.push(row(renderLegend(this.theme, this.cwd, sectionW, this.crewViewState, selectedTask, this.crewViewState.scrollLocked, this.registry)));
     lines.push(border("╰" + "─".repeat(innerW) + "╯"));
 
     if (allEvents.length > 0) {
@@ -788,7 +904,58 @@ export class MessengerOverlay implements Component, Focusable {
       clearTimeout(this.crewViewState.notificationTimer);
       this.crewViewState.notificationTimer = null;
     }
+    this.healthAlertUnsubscribe?.();
+    this.healthAlertUnsubscribe = null;
+    this.attentionPanel?.dispose();
+    this.attentionPanel = undefined;
     this.progressUnsubscribe?.();
     this.progressUnsubscribe = null;
+  }
+
+  /** Export the currently selected session to .pi/messenger/exports/<sessionId>.json */
+  private handleSessionExport(): void {
+    if (!this.registry) {
+      setNotification(this.crewViewState, this.tui, false, "No registry available for export");
+      this.tui.requestRender();
+      return;
+    }
+    const sessions = this.registry.store.list();
+    const session = sessions[this.crewViewState.monitorSelectedIndex];
+    if (!session) {
+      setNotification(this.crewViewState, this.tui, false, "No session selected");
+      this.tui.requestRender();
+      return;
+    }
+    const sessionId = session.metadata.id;
+    try {
+      const exportsDir = path.join(this.cwd, ".pi", "messenger", "exports");
+      fs.mkdirSync(exportsDir, { recursive: true });
+      const outPath = path.join(exportsDir, `${sessionId}.json`);
+      const json = this.registry.exporter.toJSON(sessionId);
+      fs.writeFileSync(outPath, json, "utf-8");
+      setNotification(this.crewViewState, this.tui, true, `Exported → .pi/messenger/exports/${sessionId}.json`);
+    } catch (e) {
+      setNotification(this.crewViewState, this.tui, false, `Export failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    this.tui.requestRender();
+  }
+
+  /** Open the replay view for the currently selected session */
+  private handleSessionReplay(): void {
+    if (!this.registry) {
+      setNotification(this.crewViewState, this.tui, false, "No registry available for replay");
+      this.tui.requestRender();
+      return;
+    }
+    const sessions = this.registry.store.list();
+    const session = sessions[this.crewViewState.monitorSelectedIndex];
+    if (!session) {
+      setNotification(this.crewViewState, this.tui, false, "No session selected");
+      this.tui.requestRender();
+      return;
+    }
+    this.replayMode = true;
+    this.replayScroll = 0;
+    this.tui.requestRender();
   }
 }

@@ -6,15 +6,31 @@
  */
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { MessengerState } from "../../lib.js";
 import type { CrewParams, Task, TaskEvidence } from "../types.js";
 import { result } from "../utils/result.js";
 import { loadCrewConfig } from "../utils/config.js";
 import * as store from "../store.js";
-import { logFeedEvent } from "../../feed.js";
+import { logFeedEvent, appendFeedEvent } from "../../feed.js";
 import { executeTaskAction } from "../task-actions.js";
 import { taskRevise, taskReviseTree } from "./revise.js";
+import { heartbeatTimestamps } from "../../lib.js";
+import { emitHeartbeat } from "../heartbeat.js";
 export { executeRevise, executeReviseTree, type ReviseResult } from "./revise.js";
+
+type NamespaceParams = CrewParams & { crew?: string; crewNamespace?: string; namespace?: string; };
+
+function resolveCrewNamespace(params: CrewParams): string {
+  const ns =
+    (params as NamespaceParams).crewNamespace
+    ?? (params as NamespaceParams).crew
+    ?? (params as NamespaceParams).namespace
+    ?? "shared";
+  const normalized = typeof ns === "string" ? ns.trim() : "";
+  return normalized.length > 0 ? normalized : "shared";
+}
 
 export async function execute(
   op: string,
@@ -23,30 +39,35 @@ export async function execute(
   ctx: ExtensionContext
 ) {
   const cwd = ctx.cwd ?? process.cwd();
+  const crewNamespace = resolveCrewNamespace(params);
 
   switch (op) {
     case "create":
-      return taskCreate(cwd, params);
+      return taskCreate(cwd, params, crewNamespace);
     case "split":
-      return taskSplit(cwd, params, state);
+      return taskSplit(cwd, params, state, crewNamespace);
     case "show":
-      return taskShow(cwd, params);
+      return taskShow(cwd, params, crewNamespace);
     case "list":
-      return taskList(cwd);
+      return taskList(cwd, crewNamespace);
     case "start":
-      return taskStart(cwd, params, state);
+      return taskStart(cwd, params, state, crewNamespace);
     case "done":
-      return taskDone(cwd, params, state);
+      return taskDone(cwd, params, state, crewNamespace);
     case "block":
-      return taskBlock(cwd, params, state);
+      return taskBlock(cwd, params, state, crewNamespace);
     case "unblock":
-      return taskUnblock(cwd, params, state);
+      return taskUnblock(cwd, params, state, crewNamespace);
     case "ready":
-      return taskReady(cwd);
+      return taskReady(cwd, crewNamespace);
     case "reset":
-      return taskReset(cwd, params, state);
+      return taskReset(cwd, params, state, crewNamespace);
     case "progress":
-      return taskProgress(cwd, params, state);
+      return taskProgress(cwd, params, state, crewNamespace);
+    case "escalate":
+      return taskEscalate(cwd, params, state, crewNamespace);
+    case "heartbeat":
+      return taskHeartbeat(cwd, params, state, crewNamespace);
     case "revise":
       return taskRevise(cwd, params, state);
     case "revise-tree":
@@ -60,7 +81,7 @@ export async function execute(
 // task.create
 // =============================================================================
 
-function taskCreate(cwd: string, params: CrewParams) {
+function taskCreate(cwd: string, params: CrewParams, namespace: string) {
   if (!params.title) {
     return result("Error: title required for task.create", { mode: "task.create", error: "missing_title" });
   }
@@ -76,14 +97,16 @@ function taskCreate(cwd: string, params: CrewParams) {
   // Validate dependencies exist
   if (params.dependsOn && params.dependsOn.length > 0) {
     for (const depId of params.dependsOn) {
-      const dep = store.getTask(cwd, depId);
+      const dep = store.getTask(cwd, depId, namespace);
       if (!dep) {
         return result(`Error: Dependency ${depId} not found`, { mode: "task.create", error: "dependency_not_found", dependency: depId });
       }
     }
   }
 
-  const task = store.createTask(cwd, params.title, params.content, params.dependsOn);
+  const task = store.createTask(cwd, params.title, params.content, params.dependsOn, namespace, {
+    critical: params.critical,
+  });
 
   const depsText = task.depends_on.length > 0 
     ? `\n**Depends on:** ${task.depends_on.join(", ")}`
@@ -107,13 +130,13 @@ Start with: \`pi_messenger({ action: "task.start", id: "${task.id}" })\``;
   });
 }
 
-function taskSplit(cwd: string, params: CrewParams, state: MessengerState) {
+function taskSplit(cwd: string, params: CrewParams, state: MessengerState, namespace: string) {
   const { id, count, subtasks } = params;
   if (!id) {
     return result("Error: id required for task.split", { mode: "task.split", error: "missing_id" });
   }
 
-  const task = store.getTask(cwd, id);
+  const task = store.getTask(cwd, id, namespace);
   if (!task) {
     return result(`Error: Task ${id} not found`, { mode: "task.split", error: "not_found", id });
   }
@@ -130,7 +153,7 @@ function taskSplit(cwd: string, params: CrewParams, state: MessengerState) {
     const spec = store.getTaskSpec(cwd, id);
     const progress = store.getTaskProgress(cwd, id);
     const suggestedCount = count ?? 2;
-    const allTasks = store.getTasks(cwd);
+    const allTasks = store.getTasks(cwd, namespace);
     const dependents = allTasks.filter(t => t.depends_on.includes(id));
     const depsText = task.depends_on.length > 0 ? task.depends_on.join(", ") : "(none)";
     const dependentsText = dependents.length > 0
@@ -192,11 +215,11 @@ The parent becomes a milestone that auto-completes when all subtasks are done.`;
 
   const created: Task[] = [];
   for (const sub of subtasks) {
-    const newTask = store.createTask(cwd, sub.title, sub.content, [...task.depends_on]);
+    const newTask = store.createTask(cwd, sub.title, sub.content, [...task.depends_on], namespace);
     created.push(newTask);
   }
 
-  const allTasks = store.getTasks(cwd);
+  const allTasks = store.getTasks(cwd, namespace);
   const subtaskIds = created.map(t => t.id);
   for (const t of allTasks) {
     if (t.id !== id && t.depends_on.includes(id) && !subtaskIds.includes(t.id)) {
@@ -240,13 +263,13 @@ The parent becomes a milestone that auto-completes when all subtasks are done.`;
 // task.show
 // =============================================================================
 
-function taskShow(cwd: string, params: CrewParams) {
+function taskShow(cwd: string, params: CrewParams, namespace: string) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.show", { mode: "task.show", error: "missing_id" });
   }
 
-  const task = store.getTask(cwd, id);
+  const task = store.getTask(cwd, id, namespace);
   if (!task) {
     return result(`Error: Task ${id} not found`, { mode: "task.show", error: "not_found", id });
   }
@@ -259,6 +282,14 @@ function taskShow(cwd: string, params: CrewParams) {
     case "in_progress":
       statusDetails = `\n**Assigned to:** ${task.assigned_to ?? "unknown"}\n**Started:** ${task.started_at}`;
       if (task.base_commit) statusDetails += `\n**Base commit:** ${task.base_commit.slice(0, 8)}`;
+      break;
+    case "pending_review":
+      statusDetails = `\n**Gate:** waiting for review approval`;
+      if (task.summary) statusDetails += `\n**Summary:** ${task.summary}`;
+      break;
+    case "pending_integration":
+      statusDetails = `\n**Gate:** review approved, waiting for integration checks`;
+      if (task.summary) statusDetails += `\n**Summary:** ${task.summary}`;
       break;
     case "done":
       statusDetails = `\n**Completed:** ${task.completed_at}`;
@@ -292,14 +323,21 @@ function taskShow(cwd: string, params: CrewParams) {
   const statusIcon = {
     todo: "⬜",
     in_progress: "🔄",
+    pending_review: "🕵️",
+    pending_integration: "🧪",
     done: "✅",
     blocked: "🚫",
   }[task.status];
 
+  const spawnFailureText = task.spawn_failure_count && task.spawn_failure_count > 0
+    ? `
+**Spawn failures:** ${task.spawn_failure_count}`
+    : "";
+
   const text = `# Task ${task.id}: ${task.title}
 
 ${statusIcon} **Status:** ${task.status}${statusDetails}
-**Attempts:** ${task.attempt_count}${depsText}${progressSection}${specPreview}`;
+**Attempts:** ${task.attempt_count}${spawnFailureText}${depsText}${progressSection}${specPreview}`;
 
   return result(text, {
     mode: "task.show",
@@ -308,12 +346,53 @@ ${statusIcon} **Status:** ${task.status}${statusDetails}
   });
 }
 
-function taskProgress(cwd: string, params: CrewParams, state: MessengerState) {
-  const { id, message } = params;
+function taskProgress(cwd: string, params: CrewParams, state: MessengerState, namespace: string) {
+  const { id, percentage, detail, phase, message } = params;
   if (!id) return result("Error: id required for task.progress", { mode: "task.progress", error: "missing_id" });
-  if (!message) return result("Error: message required for task.progress", { mode: "task.progress", error: "missing_message" });
 
-  const task = store.getTask(cwd, id);
+  // Structured progress (new API)
+  if (percentage !== undefined || detail !== undefined) {
+    if (percentage === undefined || detail === undefined) {
+      return result("Error: both percentage and detail required for structured task.progress", {
+        mode: "task.progress", error: "missing_fields"
+      });
+    }
+    if (percentage < 0 || percentage > 100) {
+      return result("Error: percentage must be between 0 and 100", {
+        mode: "task.progress", error: "invalid_percentage"
+      });
+    }
+
+    const task = store.getTask(cwd, id, namespace);
+    if (!task) return result(`Error: Task ${id} not found`, { mode: "task.progress", error: "not_found", id });
+
+    appendFeedEvent(cwd, {
+      ts: new Date().toISOString(),
+      agent: state.agentName || "unknown",
+      type: "task.progress",
+      target: id,
+      preview: `${percentage}% — ${detail}`,
+      progress: { percentage, detail, phase },
+    });
+
+    const phaseStr = phase ? ` [${phase}]` : "";
+    store.appendTaskProgress(cwd, id, state.agentName || "unknown", `${percentage}%${phaseStr} — ${detail}`);
+    store.updateTask(cwd, id, { progressPct: percentage });
+    return result(`Progress updated for ${id}: ${percentage}%${phaseStr} — ${detail}`, {
+      mode: "task.progress",
+      id,
+      percentage,
+      detail,
+      phase,
+    });
+  }
+
+  // Legacy text-based progress (backward compatibility)
+  if (!message) return result("Error: message (or percentage+detail) required for task.progress", {
+    mode: "task.progress", error: "missing_message"
+  });
+
+  const task = store.getTask(cwd, id, namespace);
   if (!task) return result(`Error: Task ${id} not found`, { mode: "task.progress", error: "not_found", id });
 
   store.appendTaskProgress(cwd, id, state.agentName || "unknown", message);
@@ -321,10 +400,105 @@ function taskProgress(cwd: string, params: CrewParams, state: MessengerState) {
 }
 
 // =============================================================================
+// task.escalate
+// =============================================================================
+
+function taskEscalate(cwd: string, params: CrewParams, state: MessengerState, namespace: string) {
+  const { id, reason, severity, suggestion } = params;
+  if (!id) return result("Error: id required for task.escalate", { mode: "task.escalate", error: "missing_id" });
+  if (!reason) return result("Error: reason required for task.escalate", { mode: "task.escalate", error: "missing_reason" });
+  if (!severity) return result("Error: severity required for task.escalate (warn|block|critical)", { mode: "task.escalate", error: "missing_severity" });
+  if (severity !== "warn" && severity !== "block" && severity !== "critical") {
+    return result("Error: severity must be 'warn', 'block', or 'critical'", { mode: "task.escalate", error: "invalid_severity" });
+  }
+
+  const task = store.getTask(cwd, id, namespace);
+  if (!task) return result(`Error: Task ${id} not found`, { mode: "task.escalate", error: "not_found", id });
+
+  appendFeedEvent(cwd, {
+    ts: new Date().toISOString(),
+    agent: state.agentName || "unknown",
+    type: "task.escalate",
+    target: id,
+    preview: `[${severity}] ${reason}`,
+    escalation: { reason, severity, suggestion },
+  });
+
+  const suggestionLogStr = suggestion ? ` — suggestion: ${suggestion}` : "";
+  store.appendTaskProgress(cwd, id, state.agentName || "unknown", `[escalate:${severity}] ${reason}${suggestionLogStr}`);
+
+  if (severity === "block" || severity === "critical") {
+    store.blockTask(cwd, id, reason);
+
+    // Deliver escalation to orchestrator inbox so orchestrator sees it immediately.
+    // The orchestrator name is configurable via crew config; defaults to 'helios'.
+    const config = loadCrewConfig(store.getCrewDir(cwd));
+    const orchestratorName = config.orchestrator ?? "helios";
+    const inboxDir = path.join(cwd, ".pi", "messenger", "inbox", orchestratorName);
+    const inboxFile = path.join(inboxDir, `${Date.now()}-escalate-${id}.json`);
+    try {
+      fs.mkdirSync(inboxDir, { recursive: true });
+      fs.writeFileSync(inboxFile, JSON.stringify({
+        type: "task.escalate",
+        taskId: id,
+        reason,
+        severity,
+        suggestion,
+        timestamp: new Date().toISOString(),
+      }));
+    } catch (e) {
+      // inbox delivery is best-effort; feed event was already written
+      console.warn(`[crew] escalate inbox write failed: ${e}`);
+    }
+  }
+
+  const suggestionStr = suggestion ? `\n**Suggestion:** ${suggestion}` : "";
+  return result(`🚨 Escalated ${id} [${severity}]: ${reason}${suggestionStr}`, {
+    mode: "task.escalate",
+    id,
+    severity,
+    reason,
+    suggestion,
+  });
+}
+
+// =============================================================================
+// task.heartbeat
+// =============================================================================
+
+function taskHeartbeat(cwd: string, params: CrewParams, state: MessengerState, _namespace: string) {
+  const { id } = params;
+  if (!id) return result("Error: id required for task.heartbeat", { mode: "task.heartbeat", error: "missing_id" });
+
+  const ts = new Date().toISOString();
+
+  // Update the in-memory heartbeat map so checkStaleHeartbeats() sees API-triggered heartbeats
+  heartbeatTimestamps.set(id, ts);
+
+  // Also write the file-based heartbeat so getStaleAgents() sees API-triggered heartbeats
+  const agentName = state.agentName || "unknown";
+  emitHeartbeat(cwd, { agentName, taskId: id, timestamp: ts });
+
+  appendFeedEvent(cwd, {
+    ts,
+    agent: state.agentName || "unknown",
+    type: "task.heartbeat",
+    target: id,
+    heartbeat: { taskId: id, status: "active" },
+  });
+
+  return result(`💓 Heartbeat emitted for ${id}`, {
+    mode: "task.heartbeat",
+    id,
+    ts,
+  });
+}
+
+// =============================================================================
 // task.list
 // =============================================================================
 
-function taskList(cwd: string) {
+function taskList(cwd: string, namespace: string) {
   const plan = store.getPlan(cwd);
   if (!plan) {
     return result("No plan found. Create one with: pi_messenger({ action: \"plan\" })", { 
@@ -332,7 +506,7 @@ function taskList(cwd: string) {
     });
   }
 
-  const tasks = store.getTasks(cwd);
+  const tasks = store.getTasks(cwd, namespace);
   if (tasks.length === 0) {
     return result(`No tasks in plan. Create with: \`pi_messenger({ action: "task.create", title: "..." })\``, {
       mode: "task.list",
@@ -344,7 +518,7 @@ function taskList(cwd: string) {
   const lines: string[] = [`# Tasks for ${store.getPlanLabel(plan)}\n`];
   
   for (const task of tasks) {
-    const icon = { todo: "⬜", in_progress: "🔄", done: "✅", blocked: "🚫" }[task.status];
+    const icon = { todo: "⬜", in_progress: "🔄", pending_review: "🕵️", pending_integration: "🧪", done: "✅", blocked: "🚫" }[task.status];
     const deps = task.depends_on.length > 0 ? ` → deps: ${task.depends_on.join(", ")}` : "";
     const assignee = task.assigned_to ? ` [${task.assigned_to}]` : "";
     lines.push(`${icon} **${task.id}**: ${task.title}${assignee}${deps}`);
@@ -369,14 +543,14 @@ function taskList(cwd: string) {
 // task.start
 // =============================================================================
 
-function taskStart(cwd: string, params: CrewParams, state: MessengerState) {
+function taskStart(cwd: string, params: CrewParams, state: MessengerState, namespace: string) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.start", { mode: "task.start", error: "missing_id" });
   }
 
   const agentName = state.agentName || "unknown";
-  const actionResult = executeTaskAction(cwd, "start", id, agentName);
+  const actionResult = executeTaskAction(cwd, "start", id, agentName, undefined, { namespace });
   if (!actionResult.success || !actionResult.task) {
     return result(`Error: ${actionResult.message}`, {
       mode: "task.start",
@@ -394,9 +568,12 @@ function taskStart(cwd: string, params: CrewParams, state: MessengerState) {
 
   const text = `🔄 Started task **${id}**
 
+*Note: task.start claims/starts the task for the current agent. It does NOT spawn a background worker by itself.*
+*If you want actual worker execution, use \`pi_messenger({ action: "work" })\`, run autonomous work, or otherwise dispatch a worker explicitly.*
+
 **Title:** ${started.title}
 **Assigned to:** ${agentName}
-**Attempt:** ${started.attempt_count}
+**Attempt:** ${started.attempt_count}${started.spawn_failure_count && started.spawn_failure_count > 0 ? ` (${started.spawn_failure_count} spawn failures)` : ""}
 ${started.base_commit ? `**Base commit:** ${started.base_commit.slice(0, 8)}` : ""}${specPreview}
 
 When done: \`pi_messenger({ action: "task.done", id: "${id}", summary: "..." })\`
@@ -419,13 +596,13 @@ If blocked: \`pi_messenger({ action: "task.block", id: "${id}", reason: "..." })
 // task.done
 // =============================================================================
 
-function taskDone(cwd: string, params: CrewParams, state: MessengerState) {
+function taskDone(cwd: string, params: CrewParams, state: MessengerState, namespace: string) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.done", { mode: "task.done", error: "missing_id" });
   }
 
-  const task = store.getTask(cwd, id);
+  const task = store.getTask(cwd, id, namespace);
   if (!task) {
     return result(`Error: Task ${id} not found`, { mode: "task.done", error: "not_found", id });
   }
@@ -436,8 +613,44 @@ function taskDone(cwd: string, params: CrewParams, state: MessengerState) {
     });
   }
 
-  const summary = params.summary ?? "Task completed";
+  const summary = params.summary?.trim();
+  if (!summary) {
+    return result("Error: summary required for task.done and must be non-empty", {
+      mode: "task.done",
+      error: "missing_summary",
+      id,
+    });
+  }
+
   const evidence: TaskEvidence | undefined = params.evidence;
+  const commitEvidence = evidence?.commits?.filter(entry => typeof entry === "string" && entry.trim().length > 0);
+  if (!commitEvidence || commitEvidence.length === 0) {
+    return result("Error: evidence.commits must include at least one non-empty entry", {
+      mode: "task.done",
+      error: "missing_evidence_commits",
+      id,
+    });
+  }
+
+  const testEvidence = evidence?.tests?.filter(entry => typeof entry === "string" && entry.trim().length > 0);
+  if (!testEvidence || testEvidence.length === 0) {
+    return result("Error: evidence.tests must include at least one non-empty entry", {
+      mode: "task.done",
+      error: "missing_evidence_tests",
+      id,
+    });
+  }
+
+  const handoffArtifactRel = path.join(".pi", "messenger", "crew", "artifacts", `${id}-handoff.md`);
+  const handoffArtifactPath = path.join(cwd, handoffArtifactRel);
+  if (!fs.existsSync(handoffArtifactPath)) {
+    return result(`Error: handoff artifact required at ${handoffArtifactRel}`, {
+      mode: "task.done",
+      error: "missing_handoff_artifact",
+      id,
+      handoff: handoffArtifactRel,
+    });
+  }
 
   const completed = store.completeTask(cwd, id, summary, evidence);
   if (!completed) {
@@ -447,7 +660,7 @@ function taskDone(cwd: string, params: CrewParams, state: MessengerState) {
   logFeedEvent(cwd, state.agentName || "unknown", "task.done", id, summary);
 
   const plan = store.getPlan(cwd);
-  const tasks = store.getTasks(cwd);
+  const tasks = store.getTasks(cwd, namespace);
   const remaining = tasks.filter(t => t.status !== "done");
 
   let nextSteps = "";
@@ -455,15 +668,16 @@ function taskDone(cwd: string, params: CrewParams, state: MessengerState) {
     nextSteps = `\n\n🎉 **All tasks complete!** Plan is finished.`;
   } else {
     const config = loadCrewConfig(store.getCrewDir(cwd));
-    const ready = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
+    const ready = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory", namespace });
     if (ready.length > 0) {
       nextSteps = `\n\n**Ready tasks:** ${ready.map(t => t.id).join(", ")}`;
     }
   }
 
-  const text = `✅ Completed task **${id}**
+  const text = `✅ Submitted task **${id}** for acceptance gates
 
 **Summary:** ${summary}
+**Status:** ${completed.status}
 **Progress:** ${plan?.completed_count}/${plan?.task_count}${nextSteps}`;
 
   return result(text, {
@@ -485,7 +699,7 @@ function taskDone(cwd: string, params: CrewParams, state: MessengerState) {
 // task.block
 // =============================================================================
 
-function taskBlock(cwd: string, params: CrewParams, state: MessengerState) {
+function taskBlock(cwd: string, params: CrewParams, state: MessengerState, namespace: string) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.block", { mode: "task.block", error: "missing_id" });
@@ -495,7 +709,7 @@ function taskBlock(cwd: string, params: CrewParams, state: MessengerState) {
     return result("Error: reason required for task.block", { mode: "task.block", error: "missing_reason" });
   }
 
-  const actionResult = executeTaskAction(cwd, "block", id, state.agentName || "unknown", params.reason);
+  const actionResult = executeTaskAction(cwd, "block", id, state.agentName || "unknown", params.reason, { namespace: namespace });
   if (!actionResult.success || !actionResult.task) {
     return result(`Error: ${actionResult.message}`, {
       mode: "task.block",
@@ -526,13 +740,13 @@ Unblock with: \`pi_messenger({ action: "task.unblock", id: "${id}" })\``;
 // task.unblock
 // =============================================================================
 
-function taskUnblock(cwd: string, params: CrewParams, state: MessengerState) {
+function taskUnblock(cwd: string, params: CrewParams, state: MessengerState, namespace: string) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.unblock", { mode: "task.unblock", error: "missing_id" });
   }
 
-  const actionResult = executeTaskAction(cwd, "unblock", id, state.agentName || "unknown");
+  const actionResult = executeTaskAction(cwd, "unblock", id, state.agentName || "unknown", undefined, { namespace });
   if (!actionResult.success || !actionResult.task) {
     return result(`Error: ${actionResult.message}`, {
       mode: "task.unblock",
@@ -560,7 +774,7 @@ Task is now ready to start: \`pi_messenger({ action: "task.start", id: "${id}" }
 // task.ready
 // =============================================================================
 
-function taskReady(cwd: string) {
+function taskReady(cwd: string, namespace: string) {
   const plan = store.getPlan(cwd);
   if (!plan) {
     return result("No plan found. Create one with: pi_messenger({ action: \"plan\" })", { 
@@ -569,11 +783,11 @@ function taskReady(cwd: string) {
   }
 
   const config = loadCrewConfig(store.getCrewDir(cwd));
-  const ready = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
+  const ready = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory", namespace });
 
   if (ready.length === 0) {
-    const tasks = store.getTasks(cwd);
-    const inProgress = tasks.filter(t => t.status === "in_progress");
+    const tasks = store.getTasks(cwd, namespace);
+    const inProgress = tasks.filter(t => t.status === "in_progress" || t.status === "pending_review" || t.status === "pending_integration");
     const blocked = tasks.filter(t => t.status === "blocked");
     const done = tasks.filter(t => t.status === "done");
 
@@ -615,15 +829,16 @@ function taskReady(cwd: string) {
 // task.reset
 // =============================================================================
 
-function taskReset(cwd: string, params: CrewParams, state: MessengerState) {
+function taskReset(cwd: string, params: CrewParams, state: MessengerState, namespace: string) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.reset", { mode: "task.reset", error: "missing_id" });
   }
 
   const cascade = params.cascade ?? false;
+  const force = params.force ?? false;
   const action = cascade ? "cascade-reset" : "reset";
-  const actionResult = executeTaskAction(cwd, action, id, state.agentName || "unknown");
+  const actionResult = executeTaskAction(cwd, action, id, state.agentName || "unknown", undefined, { namespace, force });
   if (!actionResult.success) {
     return result(`Error: ${actionResult.message}`, {
       mode: "task.reset",

@@ -44,6 +44,8 @@ import { loadConfig, matchesAutoRegisterPath, type MessengerConfig } from "./con
 import { executeCrewAction } from "./crew/index.js";
 import { logFeedEvent, pruneFeed } from "./feed.js";
 import type { CrewParams } from "./crew/types.js";
+import { createMonitorRegistry, type MonitorRegistry } from "./src/monitor/registry.js";
+import { createCrewMonitorBridge, type CrewMonitorBridge } from "./src/monitor/bridge.js";
 import {
   autonomousState,
   clearPlanningState,
@@ -65,10 +67,14 @@ import { runLegacyAgentCleanupMigration } from "./crew/utils/install.js";
 import { getLiveWorkers, onLiveWorkersChanged } from "./crew/live-progress.js";
 import { shutdownAllWorkers } from "./crew/agents.js";
 import { shutdownLobbyWorkers } from "./crew/lobby.js";
+import { reconcileOrphanedTasks } from "./crew/reconcile.js";
+import { readLeases, isLeaseStale, isProcessAlive, deleteLease } from "./crew/leases.js";
 
 let overlayTui: TUI | null = null;
 let overlayHandle: OverlayHandle | null = null;
 let overlayOpening = false;
+let monitorRegistry: MonitorRegistry | undefined;
+let monitorBridge: CrewMonitorBridge | undefined;
 
 export default function piMessengerExtension(pi: ExtensionAPI) {
   // One-time migration: remove stale crew agents from shared ~/.pi/agent/agents/
@@ -369,12 +375,23 @@ Usage (action-based API - preferred):
   pi_messenger({ action: "task.reset", id: "task-1" })          → Reset task
   
   // Crew: Review
-  pi_messenger({ action: "review", target: "task-1" })          → Review impl`,
+  pi_messenger({ action: "review", target: "task-1" })          → Review impl
+  
+  // Crew: Structured Progress Events
+  pi_messenger({ action: "task.progress", id: "task-1", percentage: 50, detail: "Halfway done" })
+  pi_messenger({ action: "task.escalate", id: "task-1", reason: "Blocked on API", severity: "block" })
+  pi_messenger({ action: "task.heartbeat", id: "task-1" })       → Emit heartbeat`,
     parameters: Type.Object({
       action: Type.Optional(Type.String({
         description: "Action to perform (e.g., 'join', 'plan', 'work', 'task.start')"
       })),
 
+      // ═══════════════════════════════════════════════════════════════════════
+      // CREW NAMESPACING PARAMETERS
+      // ═══════════════════════════════════════════════════════════════════════
+      crew: Type.Optional(Type.String({ description: "Target crew namespace (e.g. 'shared', 'alpha')" })),
+      crewMode: Type.Optional(StringEnum(["shared", "session", "branch", "worktree", "custom"], { description: "Automatic isolation mode" })),
+      
       // ═══════════════════════════════════════════════════════════════════════
       // CREW PARAMETERS
       // ═══════════════════════════════════════════════════════════════════════
@@ -419,7 +436,16 @@ Usage (action-based API - preferred):
       message: Type.Optional(Type.String({ description: "Message to send" })),
       replyTo: Type.Optional(Type.String({ description: "Message ID if this is a reply" })),
       reason: Type.Optional(Type.String({ description: "Reason for reservation, claim, or task block" })),
-      autoRegisterPath: Type.Optional(StringEnum(["add", "remove", "list"], { description: "Manage auto-register paths: add/remove current folder, or list all" }))
+      autoRegisterPath: Type.Optional(StringEnum(["add", "remove", "list"], { description: "Manage auto-register paths: add/remove current folder, or list all" })),
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // STRUCTURED PROGRESS EVENT PARAMETERS
+      // ═══════════════════════════════════════════════════════════════════════
+      percentage: Type.Optional(Type.Number({ description: "Progress percentage 0-100 (for task.progress)" })),
+      detail: Type.Optional(Type.String({ description: "Progress detail description (for task.progress)" })),
+      phase: Type.Optional(Type.String({ description: "Current phase label, e.g. 'implementation' (for task.progress)" })),
+      severity: Type.Optional(StringEnum(["warn", "block", "critical"], { description: "Escalation severity (for task.escalate)" })),
+      suggestion: Type.Optional(Type.String({ description: "Optional remediation suggestion (for task.escalate)" }))
     }),
 
     async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
@@ -503,7 +529,7 @@ Usage (action-based API - preferred):
       const snapshot = await ctx.ui.custom<string | undefined>(
         (tui, theme, _keybindings, done) => {
           overlayTui = tui;
-          return new MessengerOverlay(tui, theme, state, dirs, done, callbacks);
+          return new MessengerOverlay(tui, theme, state, dirs, done, callbacks, monitorRegistry);
         },
         {
           overlay: true,
@@ -749,6 +775,52 @@ Usage (action-based API - preferred):
 
   pi.on("session_start", async (_event, ctx) => {
     latestCtx = ctx;
+    monitorBridge?.dispose();
+    monitorBridge = undefined;
+    monitorRegistry?.dispose();
+    monitorRegistry = createMonitorRegistry();
+    monitorBridge = createCrewMonitorBridge(monitorRegistry, { cwd: ctx.cwd ?? process.cwd() });
+    monitorRegistry.healthMonitor.start(monitorRegistry.pollIntervalMs);
+
+    // Real-time dead-worker recovery: when a critical alert fires, check if the
+    // associated worker lease is stale and, if so, reset the task to "todo".
+    monitorRegistry.healthMonitor.onAlert(async (alert) => {
+      try {
+        if (alert.status !== "critical") return;
+        const alertCwd = ctx.cwd ?? process.cwd();
+        // Resolve the taskId associated with this monitor session
+        const session = monitorRegistry?.lifecycle.getStore().get(alert.sessionId);
+        const taskId = session?.metadata?.taskId;
+        if (!taskId) return;
+
+        // Check if the lease is stale or the PID is no longer alive
+        const leases = readLeases(alertCwd);
+        const lease = leases.find(l => l.taskId === taskId);
+        const isDead =
+          !lease ||
+          (lease.pid !== null && !isProcessAlive(lease.pid)) ||
+          isLeaseStale(lease);
+
+        if (isDead) {
+          const task = crewStore.getTask(alertCwd, taskId);
+          if (task && (task.status === "in_progress" || task.status === "starting")) {
+            crewStore.updateTask(alertCwd, taskId, {
+              status: "todo",
+              assigned_to: undefined,
+              started_at: undefined,
+            });
+            deleteLease(alertCwd, taskId);
+            console.log(`[crew] health monitor: reset dead worker task ${taskId} (${alert.reason})`);
+            if (ctx.hasUI) {
+              ctx.ui.notify(`Task ${taskId} worker is dead — reset to ready`, "warning");
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[crew] alert handler error:', err);
+      }
+    });
+
     startStatusHeartbeat();
     for (const entry of ctx.sessionManager.getEntries()) {
       if (entry.type === "custom" && entry.customType === "crew-state") {
@@ -834,7 +906,7 @@ Usage (action-based API - preferred):
     ctx.ui.custom<string | undefined>(
       (tui, theme, _keybindings, done) => {
         overlayTui = tui;
-        return new MessengerOverlay(tui, theme, state, dirs, done, callbacks);
+        return new MessengerOverlay(tui, theme, state, dirs, done, callbacks, monitorRegistry);
       },
       {
         overlay: true,
@@ -974,6 +1046,53 @@ Usage (action-based API - preferred):
     const readyTasks = crewStore.getReadyTasks(cwd, { advisory: crewConfig.dependencies === "advisory" });
     
     if (readyTasks.length === 0) {
+      // Reconcile orphaned tasks before giving up — a worker may have died mid-flight
+      const ns = autonomousState?.namespace;
+      const reconciled = await reconcileOrphanedTasks(cwd, ns);
+      if (reconciled.reset.length > 0) {
+        console.log(`[crew] agent_end: reconciler recovered ${reconciled.reset.length} orphaned task(s): ${reconciled.reset.join(", ")}`);
+        if (ctx.hasUI) {
+          ctx.ui.notify(`Recovered ${reconciled.reset.length} orphaned task(s) — continuing`, "info");
+        }
+        // Re-check ready tasks after recovery; continue the loop if there's now work to do
+        const recoveredReady = crewStore.getReadyTasks(cwd, { advisory: crewConfig.dependencies === "advisory" });
+        if (recoveredReady.length > 0) {
+          // Check: have all recovered tasks exceeded max attempts?
+          const maxAttempts = crewConfig.work.maxAttemptsPerTask ?? 5;
+          const maxSpawnFails = crewConfig.work.maxSpawnFailures ?? 3;
+          const allExhausted = recoveredReady.every(
+            t => t.attempt_count >= maxAttempts || (t.spawn_failure_count ?? 0) >= maxSpawnFails
+          );
+          if (allExhausted) {
+            console.log(`[crew] agent_end: all recovered tasks exhausted attempts — stopping autonomous`);
+            stopAutonomous("blocked");
+            if (ctx.hasUI) {
+              ctx.ui.notify(`Autonomous stopped: all recovered tasks exhausted attempts`, "warning");
+            }
+            return;
+          }
+
+          // Check: consecutive empty wave limit (shared with work.ts via autonomousState)
+          const maxEmpty = autonomousState.maxConsecutiveEmptyWaves ?? 3;
+          if ((autonomousState.consecutiveEmptyWaves ?? 0) >= maxEmpty) {
+            console.log(`[crew] agent_end: ${maxEmpty} consecutive empty waves — stopping autonomous`);
+            stopAutonomous("blocked");
+            if (ctx.hasUI) {
+              ctx.ui.notify(`Autonomous stopped: ${maxEmpty} consecutive waves with no progress`, "warning");
+            }
+            return;
+          }
+
+          const plan = crewStore.getPlan(cwd);
+          pi.sendMessage({
+            customType: "crew_continue",
+            content: `Recovered ${reconciled.reset.length} orphaned task(s). Continuing autonomous work on ${plan?.prd ?? "plan"}. Wave ${autonomousState.waveNumber} with ${recoveredReady.length} ready task(s).`,
+            display: true
+          }, { triggerTurn: true, deliverAs: "steer" });
+          return;
+        }
+      }
+
       // No ready tasks - check if all done or blocked
       const allTasks = crewStore.getTasks(cwd);
       const allDone = allTasks.every(t => t.status === "done");
@@ -1005,6 +1124,10 @@ Usage (action-based API - preferred):
   });
 
   pi.on("session_shutdown", async () => {
+    monitorBridge?.dispose();
+    monitorBridge = undefined;
+    monitorRegistry?.dispose();
+    monitorRegistry = undefined;
     shutdownLobbyWorkers(process.cwd());
     shutdownAllWorkers();
     stopStatusHeartbeat();

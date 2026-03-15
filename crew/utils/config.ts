@@ -60,7 +60,7 @@ export interface CrewConfig {
   };
   memory: { enabled: boolean };
   planSync: { enabled: boolean };
-  review: { enabled: boolean; maxIterations: number };
+  review: { enabled: boolean; maxIterations: number; autoAdversarial?: boolean; autoIntegrationTest?: boolean };
   planning: { maxPasses: number };
   work: {
     maxAttemptsPerTask: number;
@@ -68,10 +68,27 @@ export interface CrewConfig {
     stopOnBlock: boolean;
     env?: Record<string, string>;
     shutdownGracePeriodMs?: number;
+    /** Override the spawned executable (default: "pi"). Also overridden by PI_CREW_EXECUTABLE env var. */
+    executable?: string;
+    /** Maximum time in ms a worker may run before being killed with SIGTERM (default: 900000 = 15 min). */
+    workerTimeoutMs?: number;
+    /** Maximum spawn failures before auto-blocking a task (default: 3). */
+    maxSpawnFailures?: number;
   };
   dependencies: "advisory" | "strict";
   coordination: CoordinationLevel;
   messageBudgets: Record<CoordinationLevel, number>;
+  smokeTest: {
+    enabled: boolean;
+    intervalMs: number;
+    /** Minimum number of in_progress tasks before smoke tests trigger */
+    minActiveTasks: number;
+  };
+  /**
+   * Name of the orchestrator agent. Escalations are delivered to this agent's inbox.
+   * Defaults to 'helios'. Override per-project if the orchestrator joins with a different name.
+   */
+  orchestrator?: string;
 }
 
 const DEFAULT_CONFIG: CrewConfig = {
@@ -88,12 +105,14 @@ const DEFAULT_CONFIG: CrewConfig = {
   artifacts: { enabled: true, cleanupDays: 7 },
   memory: { enabled: false },
   planSync: { enabled: false },
-  review: { enabled: true, maxIterations: 3 },
+  review: { enabled: true, maxIterations: 3, autoAdversarial: true, autoIntegrationTest: true },
   planning: { maxPasses: 1 },
   work: { maxAttemptsPerTask: 5, maxWaves: 50, stopOnBlock: false, shutdownGracePeriodMs: 30000 },
   dependencies: "advisory",
   coordination: "chatty",
   messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: 10 },
+  smokeTest: { enabled: true, intervalMs: 120_000, minActiveTasks: 3 },
+  orchestrator: "helios",
 };
 
 function loadJson(filePath: string): Record<string, unknown> {
@@ -124,6 +143,22 @@ function deepMerge<T extends object>(target: T, ...sources: Partial<T>[]): T {
     }
   }
   return result as T;
+}
+
+/**
+ * Save (partial) crew configuration to the project-level config file.
+ * Merges with any existing project config so unrelated keys are preserved.
+ */
+export function saveCrewConfig(crewDir: string, updates: Partial<CrewConfig>): void {
+  const configPath = path.join(crewDir, PROJECT_CONFIG_FILE);
+  const existing = loadJson(configPath) as Partial<CrewConfig>;
+  const merged = { ...existing, ...updates };
+  try {
+    fs.mkdirSync(crewDir, { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify(merged, null, 2));
+  } catch (e) {
+    console.warn("[crew] failed to save config:", e);
+  }
 }
 
 /**

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 vi.mock("node:child_process", () => ({
+  execSync: vi.fn(() => "/usr/bin/which-pi\n"),
   spawn: vi.fn(() => {
     const handlers: Record<string, Function> = {};
     const proc: any = {
@@ -27,6 +28,7 @@ vi.mock("../../crew/store.js", () => ({
   getBaseCommit: vi.fn(() => "abc1234"),
   updateTask: vi.fn(),
   appendTaskProgress: vi.fn(),
+  incrementSpawnFailureCount: vi.fn(),
 }));
 
 vi.mock("../../feed.js", () => ({
@@ -252,6 +254,47 @@ describe("lobby workers", () => {
     expect(promptArg).toContain("TASK ASSIGNMENT");
   });
 
+  it("loads configured git package extensions from settings.json and still loads pi-messenger", async () => {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-lobby-home-"));
+    const originalHome = process.env.HOME;
+    process.env.HOME = tempHome;
+
+    try {
+      const settingsPath = path.join(tempHome, ".pi", "agent", "settings.json");
+      const packageExtensionPath = path.join(
+        tempHome,
+        ".pi",
+        "agent",
+        "git",
+        "github.com",
+        "acme",
+        "pi-extra",
+        "index.ts",
+      );
+      fs.mkdirSync(path.dirname(packageExtensionPath), { recursive: true });
+      fs.writeFileSync(packageExtensionPath, "export {};\n");
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      fs.writeFileSync(settingsPath, JSON.stringify({ packages: ["git:github.com/acme/pi-extra"] }));
+
+      const { spawn } = await import("node:child_process");
+      lobby.spawnLobbyWorker("/test/cwd");
+      const args = vi.mocked(spawn).mock.calls[0][1] as string[];
+      const extensionValues: string[] = [];
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] === "--extension" && args[i + 1]) {
+          extensionValues.push(args[i + 1]);
+        }
+      }
+
+      expect(extensionValues).toContain(packageExtensionPath);
+      expect(extensionValues.some(ext => path.basename(ext) === "pi-messenger")).toBe(true);
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch {}
+    }
+  });
+
   it("close handler resets orphaned in_progress task to todo", async () => {
     const storeModule = await import("../../crew/store.js");
     const feedModule = await import("../../feed.js");
@@ -418,5 +461,150 @@ describe("lobby workers", () => {
     const promptArg = calls[0][1]![calls[0][1]!.length - 1] as string;
     expect(promptArg).toContain("Standing by for task assignment");
     expect(promptArg).not.toContain("Chat With Your Team");
+  });
+
+  it("uses shared executable resolver fallback from which pi", async () => {
+    const childProc = await import("node:child_process");
+    const execSyncMock = vi.mocked(childProc.execSync);
+    execSyncMock.mockReturnValueOnce("/path/to/which/pi-binary\n");
+
+    const { spawn } = await import("node:child_process");
+    vi.mocked(spawn).mockClear();
+    delete process.env.PI_CREW_EXECUTABLE;
+    vi.mocked(spawn).mockClear();
+
+    // Ensure config has no executable override.
+    const config = await import("../../crew/utils/config.js");
+    vi.mocked(config.loadCrewConfig).mockReturnValue({
+      concurrency: { workers: 4 },
+      models: {},
+      artifacts: { enabled: false },
+      work: {},
+      coordination: "chatty",
+    } as any);
+
+    lobby.spawnLobbyWorker("/test/cwd");
+
+    const calls = vi.mocked(spawn).mock.calls;
+    expect(calls.length).toBe(1);
+    expect(calls[0][0]).toBe("/path/to/which/pi-binary");
+  });
+
+  // ── Reliability: configurable executable & ENOENT handling ──────────────────
+
+  it("uses PI_CREW_EXECUTABLE env var as the spawned executable", async () => {
+    const orig = process.env.PI_CREW_EXECUTABLE;
+    process.env.PI_CREW_EXECUTABLE = "my-custom-pi";
+    try {
+      const { spawn } = await import("node:child_process");
+      vi.mocked(spawn).mockClear();
+
+      lobby.spawnLobbyWorker("/test/cwd");
+
+      const calls = vi.mocked(spawn).mock.calls;
+      expect(calls.length).toBe(1);
+      expect(calls[0][0]).toBe("my-custom-pi");
+    } finally {
+      if (orig === undefined) delete process.env.PI_CREW_EXECUTABLE;
+      else process.env.PI_CREW_EXECUTABLE = orig;
+    }
+  });
+
+  it("uses config.work.executable when set (overrides default, below env var)", async () => {
+    const config = await import("../../crew/utils/config.js");
+    vi.mocked(config.loadCrewConfig).mockReturnValue({
+      concurrency: { workers: 4 },
+      models: {},
+      artifacts: { enabled: false },
+      work: { executable: "helios-pi" },
+      coordination: "chatty",
+    } as any);
+
+    const orig = process.env.PI_CREW_EXECUTABLE;
+    delete process.env.PI_CREW_EXECUTABLE;
+    try {
+      const { spawn } = await import("node:child_process");
+      vi.mocked(spawn).mockClear();
+
+      lobby.spawnLobbyWorker("/test/cwd");
+
+      const calls = vi.mocked(spawn).mock.calls;
+      expect(calls.length).toBe(1);
+      expect(calls[0][0]).toBe("helios-pi");
+    } finally {
+      if (orig === undefined) delete process.env.PI_CREW_EXECUTABLE;
+      else process.env.PI_CREW_EXECUTABLE = orig;
+    }
+  });
+
+  it("increments spawn failure count and logs concrete progress when assigned task fails to spawn", async () => {
+    const storeModule = await import("../../crew/store.js");
+    const { spawn } = await import("node:child_process");
+
+    const worker = lobby.spawnLobbyWorker("/test/cwd")!;
+    worker.assignedTaskId = "task-7";
+
+    const proc = worker.proc as any;
+    const errorHandler = proc._handlers["error"];
+    expect(errorHandler).toBeDefined();
+
+    const err = Object.assign(new Error("spawn failed with ENOENT"), {
+      code: "ENOENT",
+      syscall: "spawn",
+      path: "missing-pi",
+    });
+    errorHandler(err);
+
+    expect(storeModule.incrementSpawnFailureCount).toHaveBeenCalledWith("/test/cwd", "task-7");
+    expect(storeModule.appendTaskProgress).toHaveBeenCalledWith(
+      "/test/cwd",
+      "task-7",
+      "system",
+      expect.stringContaining("spawn failed with ENOENT"),
+    );
+  });
+
+  it("handles ENOENT gracefully: error handler is registered and does not throw", async () => {
+    const { spawn } = await import("node:child_process");
+    vi.mocked(spawn).mockClear();
+
+    const worker = lobby.spawnLobbyWorker("/test/cwd")!;
+    expect(worker).not.toBeNull();
+
+    const proc = worker.proc as any;
+
+    // An 'error' handler MUST be registered to prevent unhandled error crash
+    expect(proc._handlers["error"]).toBeDefined();
+
+    // Firing the handler with ENOENT must not throw
+    const enoentErr = Object.assign(new Error("spawn pi ENOENT"), { code: "ENOENT" });
+    expect(() => proc._handlers["error"](enoentErr)).not.toThrow();
+  });
+
+  it("env var PI_CREW_EXECUTABLE takes priority over config.work.executable", async () => {
+    const config = await import("../../crew/utils/config.js");
+    vi.mocked(config.loadCrewConfig).mockReturnValue({
+      concurrency: { workers: 4 },
+      models: {},
+      artifacts: { enabled: false },
+      work: { executable: "config-pi" },
+      coordination: "chatty",
+    } as any);
+
+    const orig = process.env.PI_CREW_EXECUTABLE;
+    process.env.PI_CREW_EXECUTABLE = "env-pi";
+    try {
+      const { spawn } = await import("node:child_process");
+      vi.mocked(spawn).mockClear();
+
+      lobby.spawnLobbyWorker("/test/cwd");
+
+      const calls = vi.mocked(spawn).mock.calls;
+      expect(calls.length).toBe(1);
+      expect(calls[0][0]).toBe("env-pi");
+    } finally {
+      if (orig === undefined) delete process.env.PI_CREW_EXECUTABLE;
+      else process.env.PI_CREW_EXECUTABLE = orig;
+    }
   });
 });

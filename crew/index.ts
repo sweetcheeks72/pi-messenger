@@ -6,10 +6,13 @@
  */
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import * as fs from "node:fs";
+import * as nodePath from "node:path";
 import type { MessengerState, Dirs, AgentMailMessage, NameThemeConfig } from "../lib.js";
 import * as handlers from "../handlers.js";
 import type { CrewParams, AppendEntryFn } from "./types.js";
 import { result } from "./utils/result.js";
+import { loadCrewConfig, saveCrewConfig } from "./utils/config.js";
 import { isPlanningForCwd, cancelPlanningRun } from "./state.js";
 import { logFeedEvent } from "../feed.js";
 
@@ -51,7 +54,15 @@ export async function executeCrewAction(
 
   // join - this is how you register
   if (group === 'join') {
-    return handlers.executeJoin(state, dirs, ctx, deliverMessage, updateStatus, params.spec, config?.nameTheme, config?.feedRetention);
+    const joinResult = handlers.executeJoin(state, dirs, ctx, deliverMessage, updateStatus, params.spec, config?.nameTheme, config?.feedRetention);
+    // If the caller is the orchestrator, persist their assigned peer name to config
+    // so that subsequent escalations route to the right inbox address.
+    if (params.isOrchestrator === true && state.registered && state.agentName) {
+      const cwd = ctx.cwd ?? process.cwd();
+      const crewDir = nodePath.join(cwd, ".pi", "messenger", "crew");
+      saveCrewConfig(crewDir, { orchestrator: state.agentName });
+    }
+    return joinResult;
   }
 
   // autoRegisterPath - config management, not agent operation
@@ -92,7 +103,7 @@ export async function executeCrewAction(
     }
 
     case 'feed': {
-      return handlers.executeFeed(ctx.cwd ?? process.cwd(), params.limit, config?.crewEventsInFeed ?? true);
+      return handlers.executeFeed(ctx.cwd ?? process.cwd(), params.limit, config?.crewEventsInFeed ?? true, params.filter);
     }
 
     case 'spec':
@@ -206,6 +217,90 @@ export async function executeCrewAction(
       } catch (e) {
         return result(`Error: sync handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
           { mode: "sync", error: "handler_error" });
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Question protocol — inter-agent Q&A
+    // ═══════════════════════════════════════════════════════════════════════
+    case 'ask': {
+      try {
+        const questionHandler = await import("./handlers/question.js");
+        return questionHandler.execute("ask", params, state, ctx);
+      } catch (e) {
+        return result(`Error: ask handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "ask", error: "handler_error" });
+      }
+    }
+
+    case 'answer': {
+      try {
+        const questionHandler = await import("./handlers/question.js");
+        return questionHandler.execute("answer", params, state, ctx);
+      } catch (e) {
+        return result(`Error: answer handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "answer", error: "handler_error" });
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Inbox — consume-on-read inbox for the current agent
+    // ═══════════════════════════════════════════════════════════════════════
+    case 'inbox': {
+      if (op === 'list') {
+        const cwd = ctx.cwd ?? process.cwd();
+        const agentName = state.agentName;
+        if (!agentName) {
+          return result("Error: agent name not set. Join the mesh first with pi_messenger({ action: \"join\" }).",
+            { mode: "inbox.list", error: "no_agent_name" });
+        }
+        const inboxDir = nodePath.join(cwd, ".pi", "messenger", "inbox", agentName);
+        if (!fs.existsSync(inboxDir)) {
+          return result("Inbox is empty.", { mode: "inbox.list", messages: [] });
+        }
+        const files = fs.readdirSync(inboxDir).filter((f: string) => f.endsWith(".json")).sort();
+        const messages: unknown[] = [];
+        for (const file of files) {
+          const filePath = nodePath.join(inboxDir, file);
+          try {
+            const msg = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+            messages.push(msg);
+            fs.unlinkSync(filePath);
+          } catch {
+            // skip malformed files
+          }
+        }
+        if (messages.length === 0) {
+          return result("Inbox is empty.", { mode: "inbox.list", messages: [] });
+        }
+        return result(`# Inbox (${messages.length} message${messages.length === 1 ? "" : "s"})\n\n${messages.map(m => JSON.stringify(m, null, 2)).join("\n---\n")}`,
+          { mode: "inbox.list", messages });
+      }
+      return result(`Unknown inbox operation: inbox.${op ?? "(none)"}`, { mode: "inbox", error: "unknown_operation" });
+    }
+
+    case 'questions': {
+      const questionOp = op ?? "list";
+      try {
+        const questionHandler = await import("./handlers/question.js");
+        return questionHandler.execute(questionOp, params, state, ctx);
+      } catch (e) {
+        return result(`Error: questions.${questionOp} handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "questions", error: "handler_error", operation: questionOp });
+      }
+    }
+
+    case 'blackboard': {
+      if (!op) {
+        return result("Error: blackboard action requires operation (e.g., 'blackboard.post', 'blackboard.read').",
+          { mode: "blackboard", error: "missing_operation" });
+      }
+      try {
+        const blackboardHandler = await import("./handlers/blackboard.js");
+        return blackboardHandler.execute(op, params, state, ctx);
+      } catch (e) {
+        return result(`Error: blackboard.${op} handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "blackboard", error: "handler_error", operation: op });
       }
     }
 

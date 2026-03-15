@@ -200,6 +200,7 @@ Full config reference (all fields optional — only set what you want to change)
 | `work.maxWaves` | Max autonomous waves | `50` |
 | `work.shutdownGracePeriodMs` | Grace period before SIGTERM on abort | `30000` |
 | `work.env` | Environment variables passed to spawned workers | `{}` |
+| `work.executable` | Override the spawned worker executable. Resolution order is `PI_CREW_EXECUTABLE` → `work.executable` → `which pi` → `pi`. | `"pi"` |
 
 ### Default Agent Models
 

@@ -13,19 +13,32 @@ import type { CrewAgentConfig } from "./utils/discover.js";
 // =============================================================================
 
 export interface Plan {
+  run_id?: string;               // Immutable run identifier for active/archived plan lineage
+  source_key?: string;           // Stable source identity (prd:<path> | prompt:<text>)
   prd: string;                   // Path to PRD file (relative to cwd)
   prompt?: string;               // Inline prompt text (when no PRD file)
   created_at: string;            // ISO timestamp
   updated_at: string;            // ISO timestamp
   task_count: number;            // Total tasks
   completed_count: number;       // Completed tasks
+
+  /** NEW: All source specs for this plan (multi-spec support) */
+  sources?: SpecSource[];
 }
 
 // =============================================================================
 // Task Types
 // =============================================================================
 
-export type TaskStatus = "todo" | "in_progress" | "done" | "blocked";
+export type TaskStatus =
+  | "todo"
+  | "assigned"       // worker allocated, not yet spawned
+  | "starting"       // process spawned, awaiting first heartbeat
+  | "in_progress"    // heartbeat received, actively working
+  | "pending_review" // worker submitted completion; awaiting review gate
+  | "pending_integration" // review approved; awaiting integration/test gate
+  | "done"
+  | "blocked";
 
 export interface TaskEvidence {
   commits?: string[];            // Commit SHAs
@@ -35,6 +48,7 @@ export interface TaskEvidence {
 
 export interface Task {
   id: string;                    // task-N format
+  namespace?: string;            // Crew namespace owner (defaults to shared)
   title: string;
   status: TaskStatus;
   milestone?: boolean;
@@ -45,12 +59,36 @@ export interface Task {
   started_at?: string;           // When task.start was called
   completed_at?: string;         // When task.done was called
   base_commit?: string;          // Git commit SHA at task.start
+  head_commit?: string;          // Git commit SHA when task completed (set by completeTask)
   assigned_to?: string;          // Agent name currently working on it
+  model_identity?: string;      // Stable provider/model or config fingerprint for metrics
+  model_identity_dual?: string[]; // Dual-worker identity set for critical tasks
   summary?: string;              // Completion summary from task.done
   evidence?: TaskEvidence;       // Evidence from task.done
   blocked_reason?: string;       // Reason from task.block
   attempt_count: number;         // How many times attempted (for auto-block)
+
+  /** NEW: Which spec produced this task (for multi-spec pools) */
+  source_spec_id?: string;
+
+  /** NEW: ISO timestamp when task was assigned to a worker */
+  assigned_at?: string;
+
+  /** NEW: Worker ID holding current lease */
+  worker_id?: string;
+
+  /** Latest progress percentage (0-100), persisted so it survives restarts */
+  progressPct?: number;
+
+  /** NEW: How many times this task has been reset/retried */
+  retry_count?: number;
+  spawn_failure_count?: number;  // How many times the spawned process failed to start (ENOENT/EACCES/etc.)
   last_review?: ReviewFeedback;  // Feedback from last review (for retry)
+  rollback_reason?: string;      // Reason task was rolled back and re-queued
+
+
+  /** When true, task gets dual-worker verification: two independent workers, outputs compared */
+  critical?: boolean;
 }
 
 export interface ReviewFeedback {
@@ -101,14 +139,43 @@ export interface CrewParams {
   concurrency?: number;
   model?: string;
 
+  // Handoff
+  handoffBrief?: {
+    changes: string[];
+    assumptions: string[];
+    warnings: string[];
+  };
+
   // Task reset
   cascade?: boolean;
+  force?: boolean;
 
+  // Structured progress (task.progress)
+  percentage?: number;
+  detail?: string;
+  phase?: string;
+
+  // Join options
+  isOrchestrator?: boolean;      // If true, saves agentName to config.orchestrator on join
+
+  // Escalation (task.escalate)
+  severity?: "warn" | "block" | "critical";
+  suggestion?: string;
+
+  // Critical task dual-verification
+  critical?: boolean;
   // Revision
   prompt?: string;
 
   // Feed
   limit?: number;
+  filter?: string;
+
+  // Question protocol
+  question?: string;
+  questionId?: string;
+  answer?: string;
+  context?: string;
 
   // Coordination
   spec?: string;
@@ -120,6 +187,13 @@ export interface CrewParams {
   name?: string;
   notes?: string;
   autoRegisterPath?: "add" | "remove" | "list";
+
+  // Blackboard
+  key?: string;
+  value?: string;
+  reasoning?: string;
+  challenge?: string;
+  resolution?: string;
 }
 
 // =============================================================================
@@ -145,6 +219,7 @@ export interface AgentTask {
   taskId?: string;
   modelOverride?: string;
   maxOutput?: MaxOutputConfig;
+  workerName?: string;           // pre-assigned worker name for duplicate dispatch prevention
 }
 
 export interface AgentResult {
@@ -170,3 +245,134 @@ export interface AgentResult {
 // =============================================================================
 
 export type AppendEntryFn = (type: string, data: unknown) => void;
+
+// =============================================================================
+// Worker Lease Types (durable lease store)
+// =============================================================================
+
+export type WorkerLeaseStatus = "assigned" | "starting" | "active" | "completed" | "failed";
+
+export interface WorkerLease {
+  /** Matches Task.id */
+  taskId: string;
+  /** Unique worker identifier: crew-worker-{shortHash} */
+  workerId: string;
+  /** OS PID of spawned pi process */
+  pid: number | null;
+  /** ISO 8601 — when task was assigned */
+  assignedAt: string;
+  /** ISO 8601 — when process was spawned */
+  spawnedAt: string | null;
+  /** ISO 8601 — last heartbeat (updated every 30 s by worker) */
+  heartbeatAt: string | null;
+  /** ISO 8601 — first heartbeat received */
+  startedAt: string | null;
+  /** Current lease status */
+  status: WorkerLeaseStatus;
+  /** Model used for this worker (provider/model-id) */
+  model: string | null;
+  /** How many consecutive restart attempts */
+  restartCount: number;
+}
+
+export interface WorkerLeaseStore {
+  version: "1";
+  updatedAt: string;
+  leases: WorkerLease[];
+}
+
+// =============================================================================
+// Multi-Spec Plan Types
+// =============================================================================
+
+export type SpecSourceType = "prd" | "prompt" | "github_issue" | "user_request" | "inline";
+
+export interface SpecSource {
+  /** e.g. "spec-1", "spec-2" */
+  id: string;
+  type: SpecSourceType;
+  /** Relative or absolute path to spec file */
+  path?: string;
+  /** Inline spec content (for prompt/inline types) */
+  content?: string;
+  created_at: string;
+  /** Optional display title */
+  title?: string;
+}
+
+// =============================================================================
+// Thread Model Types (TASK-05)
+// =============================================================================
+
+/**
+ * A thread group aggregates a root event and its replies.
+ * Used by renderFeedSection() for threaded display.
+ */
+export interface ThreadGroup {
+  /** The root (parent) event that started the thread */
+  rootEvent: import("../feed.js").FeedEvent;
+  /** Replies sorted by timestamp */
+  replies: import("../feed.js").FeedEvent[];
+  /** Total number of replies */
+  replyCount: number;
+}
+
+/**
+ * Options for thread rendering in the overlay feed.
+ */
+export interface ThreadRenderOptions {
+  /** Maximum replies to show inline before collapsing (default: 3) */
+  maxInlineReplies: number;
+  /** Whether to show reply indicators (├─ / └─) */
+  showReplyIndicators: boolean;
+}
+
+export const DEFAULT_THREAD_RENDER_OPTIONS: ThreadRenderOptions = {
+  maxInlineReplies: 3,
+  showReplyIndicators: true,
+};
+
+// =============================================================================
+// Rich Content Types (TASK-06)
+// =============================================================================
+
+/**
+ * Content type for rich message blocks within a FeedEvent.
+ * Supports structured rendering of code, diffs, file references, and tables.
+ */
+export type RichContentType = "text" | "code" | "diff" | "file" | "table";
+
+/**
+ * A single block of rich content attached to a FeedEvent.
+ * Multiple blocks can form a composite message (e.g., explanation + code + diff).
+ */
+export interface RichContent {
+  /** The type of content block */
+  type: RichContentType;
+  /** The raw content string */
+  content: string;
+  /** Programming language for code blocks (e.g., "typescript", "python") */
+  language?: string;
+  /** File path for file references and diff blocks */
+  filename?: string;
+  /** Whether this block should render collapsed by default */
+  collapsed?: boolean;
+}
+
+/**
+ * Options for rendering rich content blocks in the TUI overlay.
+ */
+export interface RichContentRenderOptions {
+  /** Maximum number of lines to show before collapsing (default: 10) */
+  maxVisibleLines: number;
+  /** Whether to show language labels on code blocks (default: true) */
+  showLanguageLabel: boolean;
+  /** Whether to colorize diff +/- lines (default: true) */
+  colorizeDiffs: boolean;
+}
+
+export const DEFAULT_RICH_CONTENT_RENDER_OPTIONS: RichContentRenderOptions = {
+  maxVisibleLines: 10,
+  showLanguageLabel: true,
+  colorizeDiffs: true,
+};

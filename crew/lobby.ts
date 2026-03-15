@@ -13,8 +13,14 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { generateMemorableName } from "../lib.js";
-import { resolveThinking, modelHasThinkingSuffix, pushModelArgs } from "./agents.js";
+import {
+  resolveThinking,
+  modelHasThinkingSuffix,
+  pushModelArgs,
+  resolveExecutable,
+} from "./agents.js";
 import { discoverCrewAgents } from "./utils/discover.js";
+import { loadConfiguredPackageExtensions } from "./utils/extensions.js";
 import { loadCrewConfig, type CrewConfig } from "./utils/config.js";
 import {
   createProgress,
@@ -82,16 +88,27 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
 
   if (workerConfig.tools?.length) {
     const builtinTools: string[] = [];
-    const extensionPaths: string[] = [];
+    const extensionPaths = new Set<string>();
     for (const tool of workerConfig.tools) {
       if (tool.includes("/") || tool.endsWith(".ts") || tool.endsWith(".js")) {
-        extensionPaths.push(tool);
+        extensionPaths.add(tool);
       } else if (BUILTIN_TOOLS.has(tool)) {
         builtinTools.push(tool);
       }
     }
     if (builtinTools.length > 0) args.push("--tools", builtinTools.join(","));
+    for (const configuredPath of loadConfiguredPackageExtensions()) {
+      if (configuredPath !== EXTENSION_DIR) {
+        extensionPaths.add(configuredPath);
+      }
+    }
     for (const ext of extensionPaths) args.push("--extension", ext);
+  } else {
+    for (const configuredPath of loadConfiguredPackageExtensions()) {
+      if (configuredPath !== EXTENSION_DIR) {
+        args.push("--extension", configuredPath);
+      }
+    }
   }
 
   args.push("--extension", EXTENSION_DIR);
@@ -109,7 +126,9 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
   const envOverrides = config.work.env ?? {};
   const env = { ...process.env, ...envOverrides, PI_AGENT_NAME: name, PI_CREW_WORKER: "1", PI_LOBBY_ID: id };
 
-  const proc = spawn("pi", args, {
+  const executable = resolveExecutable(config);
+
+  const proc = spawn(executable, args, {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
     env,
@@ -137,6 +156,8 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
 
   const progress = createProgress("crew-worker");
 
+  let spawnFailed = false;
+  let spawnFailureDetails: string | null = null;
   let jsonlBuffer = "";
   proc.stdout?.on("data", (data) => {
     try {
@@ -167,6 +188,30 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
     } catch {}
   });
 
+  // Guard against ENOENT and other spawn failures — without this handler
+  // Node.js would emit an uncaught error and crash the orchestrator.
+  proc.on("error", (err: NodeJS.ErrnoException) => {
+    const failureDetails = `Failed to spawn worker "${executable}": ${err.message} (${err.code ?? "unknown"})`;
+    spawnFailed = true;
+    spawnFailureDetails = failureDetails;
+    process.stderr.write(`[pi-messenger] ${failureDetails}\n`);
+
+    if (worker.assignedTaskId) {
+      const task = store.getTask(cwd, worker.assignedTaskId);
+      store.incrementSpawnFailureCount(cwd, worker.assignedTaskId);
+      store.appendTaskProgress(
+        cwd,
+        worker.assignedTaskId,
+        "system",
+        `Lobby worker ${worker.name} spawn failed: ${failureDetails}`
+      );
+      if (task && task.status === "in_progress" && task.assigned_to === worker.name) {
+        store.updateTask(cwd, worker.assignedTaskId, { status: "todo", assigned_to: undefined });
+        logFeedEvent(cwd, worker.name, "task.reset", worker.assignedTaskId, `Spawn failed: ${failureDetails}`);
+      }
+    }
+  });
+
   proc.on("close", (exitCode) => {
     const displayId = worker.assignedTaskId ?? taskId;
     removeLiveWorker(cwd, displayId);
@@ -178,21 +223,23 @@ export function spawnLobbyWorker(cwd: string, promptOverride?: string): LobbyWor
       try { fs.unlinkSync(worker.aliveFile); } catch {}
     }
     if (worker.assignedTaskId) {
-      const task = store.getTask(cwd, worker.assignedTaskId);
-      if (task && task.status === "in_progress" && task.assigned_to === worker.name) {
-        const config = loadCrewConfig(store.getCrewDir(cwd));
-        if (task.attempt_count >= config.work.maxAttemptsPerTask) {
-          store.updateTask(cwd, worker.assignedTaskId, {
-            status: "blocked",
-            blocked_reason: `Max attempts (${config.work.maxAttemptsPerTask}) reached`,
-            assigned_to: undefined,
-          });
-          logFeedEvent(cwd, worker.name, "task.block", worker.assignedTaskId, `Max attempts reached`);
-        } else {
-          store.updateTask(cwd, worker.assignedTaskId, { status: "todo", assigned_to: undefined });
-          store.appendTaskProgress(cwd, worker.assignedTaskId, "system",
-            `Lobby worker ${worker.name} exited (code ${exitCode ?? "unknown"}), reset to todo`);
-          logFeedEvent(cwd, worker.name, "task.reset", worker.assignedTaskId, "worker exited");
+      if (!spawnFailed) {
+        const task = store.getTask(cwd, worker.assignedTaskId);
+        if (task && task.status === "in_progress" && task.assigned_to === worker.name) {
+          const config = loadCrewConfig(store.getCrewDir(cwd));
+          if (task.attempt_count >= config.work.maxAttemptsPerTask) {
+            store.updateTask(cwd, worker.assignedTaskId, {
+              status: "blocked",
+              blocked_reason: `Max attempts (${config.work.maxAttemptsPerTask}) reached`,
+              assigned_to: undefined,
+            });
+            logFeedEvent(cwd, worker.name, "task.block", worker.assignedTaskId, `Max attempts reached`);
+          } else {
+            store.updateTask(cwd, worker.assignedTaskId, { status: "todo", assigned_to: undefined });
+            store.appendTaskProgress(cwd, worker.assignedTaskId, "system",
+              `Lobby worker ${worker.name} exited (code ${exitCode ?? "unknown"}), reset to todo`);
+            logFeedEvent(cwd, worker.name, "task.reset", worker.assignedTaskId, "worker exited");
+          }
         }
       }
     } else {
@@ -477,4 +524,229 @@ The task will already be claimed and started for you — do NOT call \`task.star
 `;
 
   return prompt;
+}
+
+// =============================================================================
+// Heartbeat Stale Detection
+// =============================================================================
+
+import { getStaleAgents } from "./heartbeat.js";
+
+/**
+ * Check for stale worker heartbeats and log warnings.
+ * Call this from any monitoring/polling cycle (e.g. work waves, autonomous loop).
+ */
+export function checkStaleHeartbeats(cwd: string): void {
+  const stale = getStaleAgents(cwd);
+  for (const hb of stale) {
+    logFeedEvent(
+      cwd,
+      hb.agentName,
+      "heartbeat.stale",
+      hb.taskId,
+      `Agent ${hb.agentName} stale on ${hb.taskId} (last heartbeat: ${hb.timestamp})`,
+    );
+  }
+}
+
+// =============================================================================
+// Smoke Test — Background Repo Health Checks
+// =============================================================================
+
+import type { ChildProcess } from "node:child_process";
+
+let smokeTestProc: ChildProcess | null = null;
+let smokeTestTimer: ReturnType<typeof setInterval> | null = null;
+
+function extractAssistantTextFromJsonl(jsonl: string): string {
+  let text = "";
+  for (const line of jsonl.split("\n")) {
+    const event = parseJsonlLine(line);
+    if (!event || event.type !== "message_end" || event.message?.role !== "assistant") continue;
+    for (const part of event.message.content ?? []) {
+      if (part.type === "text" && part.text) {
+        text += part.text + "\n";
+      }
+    }
+  }
+  return text;
+}
+
+export interface SmokeRollbackSignal {
+  taskId: string;
+  reason: string;
+}
+
+export function parseSmokeRollbackSignal(output: string): SmokeRollbackSignal | null {
+  if (!/\bstatus:\s*BROKEN\b/i.test(output) && !/\bREPO\s+BROKEN\b/i.test(output)) {
+    return null;
+  }
+
+  const taskMatch = output.match(/responsible_task:\s*["']?((?:task|TASK)-\d+)["']?/i);
+  if (!taskMatch) return null;
+  const taskId = taskMatch[1].toLowerCase();
+
+  const statusLine = output.match(/🔴\s*REPO\s+BROKEN:\s*([^\n]+)/i)?.[1]?.trim();
+  const failingTest = output.match(/failing_tests:[\s\S]*?\n\s*-\s*["']?([^"'\n]+)["']?/i)?.[1]?.trim();
+  const reasonDetail = statusLine ?? (failingTest ? `Failing check: ${failingTest}` : "Smoke test reported repository breakage");
+
+  return {
+    taskId,
+    reason: `Smoke test BROKEN. Responsible task: ${taskId}. ${reasonDetail}`,
+  };
+}
+
+/**
+ * Determine whether a background smoke test should run.
+ * Returns true when 3+ tasks (configurable via minActiveTasks) are currently in_progress.
+ */
+export function shouldRunSmokeTest(cwd: string): boolean {
+  const crewDir = store.getCrewDir(cwd);
+  const config = loadCrewConfig(crewDir);
+  if (!config.smokeTest.enabled) return false;
+
+  const tasks = store.getTasks(cwd);
+  const activeCount = tasks.filter(
+    (t) => t.status === "in_progress" || t.status === "starting",
+  ).length;
+  return activeCount >= config.smokeTest.minActiveTasks;
+}
+
+/**
+ * Spawn the smoke-tester agent as a background process.
+ * Only one smoke test runs at a time — subsequent calls are no-ops if one is already running.
+ */
+export function startSmokeTest(cwd: string): void {
+  if (smokeTestProc && smokeTestProc.exitCode === null) return;
+
+  const crewDir = store.getCrewDir(cwd);
+  const config = loadCrewConfig(crewDir);
+  const executable = resolveExecutable(config);
+
+  const agentPath = path.join(
+    os.homedir(),
+    ".pi",
+    "agent",
+    "agents",
+    "smoke-tester.md",
+  );
+
+  // Only spawn if the agent definition exists
+  if (!fs.existsSync(agentPath)) {
+    logFeedEvent(cwd, "smoke-tester", "smoke.skip", undefined, "smoke-tester.md agent not found");
+    return;
+  }
+
+  const prompt = `Run a smoke test on the repository at ${cwd}. Check compilation and tests. Report results.`;
+  const args = [
+    "--mode", "json",
+    "--no-session",
+    "--tools", "read,bash,grep,find",
+    "--append-system-prompt", agentPath,
+    "-p", prompt,
+  ];
+
+  const model = config.models?.worker;
+  if (model) pushModelArgs(args, model);
+
+  smokeTestProc = spawn(executable, args, {
+    cwd,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, PI_AGENT_NAME: "smoke-tester", PI_CREW_WORKER: "1" },
+  });
+
+  logFeedEvent(cwd, "smoke-tester", "smoke.start", undefined, "Background smoke test started");
+
+  let stdoutBuffer = "";
+  let stderrBuffer = "";
+  smokeTestProc.stdout?.on("data", (data) => {
+    stdoutBuffer += data.toString();
+  });
+  smokeTestProc.stderr?.on("data", (data) => {
+    stderrBuffer += data.toString();
+  });
+
+  smokeTestProc.on("close", (exitCode) => {
+    const assistantOutput = extractAssistantTextFromJsonl(stdoutBuffer);
+    const rollbackSignal = parseSmokeRollbackSignal(`${assistantOutput}
+${stdoutBuffer}
+${stderrBuffer}`);
+    const smokeType = rollbackSignal
+      ? "smoke.fail"
+      : exitCode === 0 ? "smoke.pass" : "smoke.fail";
+
+    logFeedEvent(
+      cwd,
+      "smoke-tester",
+      smokeType,
+      rollbackSignal?.taskId,
+      rollbackSignal
+        ? `BROKEN ${rollbackSignal.taskId}: ${rollbackSignal.reason}`
+        : `Smoke test exited (code ${exitCode ?? "unknown"})`,
+    );
+
+    if (rollbackSignal) {
+      void import("./handlers/work.js")
+        .then(({ triggerRollback }) => {
+          triggerRollback(cwd, rollbackSignal.taskId, rollbackSignal.reason);
+        })
+        .catch((err) => {
+          logFeedEvent(cwd, "smoke-tester", "smoke.error", rollbackSignal.taskId,
+            `Failed to trigger rollback: ${err instanceof Error ? err.message : String(err)}`);
+        });
+    }
+
+    smokeTestProc = null;
+  });
+
+  smokeTestProc.on("error", (err) => {
+    logFeedEvent(cwd, "smoke-tester", "smoke.error", undefined, `Smoke test spawn error: ${err.message}`);
+    smokeTestProc = null;
+  });
+}
+
+/**
+ * Kill the running smoke test process, if any.
+ */
+export function stopSmokeTest(): void {
+  if (smokeTestProc && smokeTestProc.exitCode === null) {
+    smokeTestProc.kill("SIGTERM");
+    smokeTestProc = null;
+  }
+  if (smokeTestTimer) {
+    clearInterval(smokeTestTimer);
+    smokeTestTimer = null;
+  }
+}
+
+/**
+ * Start or stop the periodic smoke test check based on current task activity.
+ * Call this from any monitoring/polling cycle (e.g. work waves, autonomous loop).
+ */
+export function manageSmokeTestCycle(cwd: string): void {
+  const crewDir = store.getCrewDir(cwd);
+  const config = loadCrewConfig(crewDir);
+
+  if (!config.smokeTest.enabled) {
+    stopSmokeTest();
+    return;
+  }
+
+  if (shouldRunSmokeTest(cwd)) {
+    // Start periodic checks if not already running
+    if (!smokeTestTimer) {
+      // Run one immediately
+      startSmokeTest(cwd);
+      // Schedule periodic runs
+      smokeTestTimer = setInterval(() => {
+        if (shouldRunSmokeTest(cwd)) {
+          startSmokeTest(cwd);
+        } else {
+          stopSmokeTest();
+        }
+      }, config.smokeTest.intervalMs);
+    }
+  } else {
+    stopSmokeTest();
+  }
 }
