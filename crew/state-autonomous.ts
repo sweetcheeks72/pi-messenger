@@ -26,6 +26,8 @@ export interface AutonomousState {
   concurrency: number;
   autoOverlayPending: boolean;
   namespace?: string;
+  consecutiveEmptyWaves: number;
+  maxConsecutiveEmptyWaves: number;
 }
 
 export const autonomousState: AutonomousState = {
@@ -39,6 +41,8 @@ export const autonomousState: AutonomousState = {
   concurrency: 2,
   autoOverlayPending: false,
   namespace: undefined,
+  consecutiveEmptyWaves: 0,
+  maxConsecutiveEmptyWaves: 3,
 };
 
 export const MIN_CONCURRENCY = 1;

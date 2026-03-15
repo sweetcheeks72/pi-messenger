@@ -537,7 +537,8 @@ export function resetTask(cwd: string, taskId: string, cascade: boolean = false)
     summary: undefined,
     evidence: undefined,
     blocked_reason: undefined,
-    // Keep attempt_count for tracking
+    last_review: undefined,
+    // Keep attempt_count and spawn_failure_count for tracking
   });
   if (updated) resetTasks.push(updated);
 

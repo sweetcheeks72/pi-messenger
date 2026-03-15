@@ -72,6 +72,8 @@ export interface CrewConfig {
     executable?: string;
     /** Maximum time in ms a worker may run before being killed with SIGTERM (default: 900000 = 15 min). */
     workerTimeoutMs?: number;
+    /** Maximum spawn failures before auto-blocking a task (default: 3). */
+    maxSpawnFailures?: number;
   };
   dependencies: "advisory" | "strict";
   coordination: CoordinationLevel;

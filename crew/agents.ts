@@ -433,12 +433,28 @@ async function runAgent(
         store.incrementSpawnFailureCount(cwd, task.taskId);
         const currentTask = store.getTask(cwd, task.taskId);
         if (currentTask?.status === "in_progress" && currentTask.assigned_to === workerName) {
-          store.updateTask(cwd, task.taskId, {
-            status: "todo",
-            assigned_to: undefined,
-            started_at: undefined,
-            base_commit: undefined,
-          });
+          const MAX_SPAWN_FAILURES = 3;
+          const updatedTask = store.getTask(cwd, task.taskId);
+          const spawnFailures = updatedTask?.spawn_failure_count ?? 0;
+
+          if (spawnFailures >= MAX_SPAWN_FAILURES) {
+            store.updateTask(cwd, task.taskId, {
+              status: "blocked",
+              assigned_to: undefined,
+              started_at: undefined,
+              base_commit: undefined,
+              blocked_reason: `Spawn failed ${spawnFailures} times (${err.code ?? "unknown"}) — kill zombie processes and reset`,
+            });
+            store.appendTaskProgress(cwd, task.taskId, "system",
+              `Auto-blocked after ${spawnFailures} spawn failures (max: ${MAX_SPAWN_FAILURES})`);
+          } else {
+            store.updateTask(cwd, task.taskId, {
+              status: "todo",
+              assigned_to: undefined,
+              started_at: undefined,
+              base_commit: undefined,
+            });
+          }
         }
       }
 

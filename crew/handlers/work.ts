@@ -102,13 +102,13 @@ function resolveStableModelIdentity(parts: {
 const FEYNMAN_ROLES: CrewRole[] = ["scout", "planner", "worker", "reviewer", "verifier", "auditor", "researcher", "analyst"];
 
 const ROLE_KEYWORDS: Array<{ role: CrewRole; patterns: RegExp[] }> = [
+  { role: "worker", patterns: [/\bimplement\b/i, /\bfix\b/i, /\badd\b/i, /\bbuild\b/i, /\bedit(s)?\b/i, /\bmodify\b/i, /\bcreate\b/i, /\bextend\b/i, /\bwire\b/i] },
   { role: "reviewer", patterns: [/\badversarial review\b/i, /\bcode review\b/i, /\breview\b/i] },
   { role: "verifier", patterns: [/\binvariant\b/i, /\btrace\b/i, /\bverify\b/i, /\bcorrectness\b/i] },
   { role: "auditor", patterns: [/\baudit\b/i, /\bfact\b/i, /\bclaim\b/i, /\bcompliance\b/i] },
   { role: "researcher", patterns: [/\bresearch\b/i, /\bbenchmark\b/i, /\bexternal\b/i, /\bdocs?\b/i] },
   { role: "planner", patterns: [/\bplan\b/i, /\barchitecture\b/i, /\bdecomposition\b/i, /\broadmap\b/i, /\bdesign\b/i] },
   { role: "scout", patterns: [/\brecon\b/i, /\bimpact analysis\b/i, /\bmap(ping)?\b/i, /\binventory\b/i, /\bexplore\b/i] },
-  { role: "worker", patterns: [/\bimplement\b/i, /\bfix\b/i, /\badd\b/i, /\bbuild\b/i, /\bedit(s)?\b/i, /\bmodify\b/i] },
 ];
 
 function normalizeRole(value: string | undefined): CrewRole | undefined {
@@ -125,14 +125,14 @@ export function classifyTaskToFeynmanRole(
   const explicit = normalizeRole(preferredRole);
   if (explicit) return explicit;
 
-  const text = `${title}
-${spec ?? ""}`;
+  // Only search title — specs routinely contain "verify", "review" in acceptance criteria
+  // which doesn't mean the task should be handled by a reviewer/verifier
   for (const entry of ROLE_KEYWORDS) {
-    if (entry.patterns.some(pattern => pattern.test(text))) {
+    if (entry.patterns.some(pattern => pattern.test(title))) {
       return entry.role;
     }
   }
-  return "worker";
+  return "worker";  // default to worker for implementation tasks
 }
 
 
@@ -710,7 +710,18 @@ export async function execute(
         `Auto-blocked after ${task.attempt_count} attempts (max: ${config.work.maxAttemptsPerTask})`);
       logFeedEvent(cwd, "crew", "task.block", task.id, `Max attempts (${config.work.maxAttemptsPerTask}) reached`);
     } else {
-      readyTasks.push(task);
+      const maxSpawnFailures = config.work.maxSpawnFailures ?? 3;
+      if (task.spawn_failure_count >= maxSpawnFailures) {
+        store.updateTask(cwd, task.id, {
+          status: "blocked",
+          blocked_reason: `Spawn failed ${task.spawn_failure_count} times — system may be overloaded`,
+        });
+        store.appendTaskProgress(cwd, task.id, "system",
+          `Auto-blocked after ${task.spawn_failure_count} spawn failures (max: ${maxSpawnFailures})`);
+        logFeedEvent(cwd, "crew", "task.block", task.id, `Spawn failed ${task.spawn_failure_count} times`);
+      } else {
+        readyTasks.push(task);
+      }
     }
   }
 
@@ -1158,6 +1169,15 @@ ${reason}`, {
       timestamp: new Date().toISOString()
     });
 
+    // Track consecutive waves with no progress
+    if (succeeded.length === 0) {
+      autonomousState.consecutiveEmptyWaves = (autonomousState.consecutiveEmptyWaves ?? 0) + 1;
+    } else {
+      autonomousState.consecutiveEmptyWaves = 0;
+    }
+
+    const maxEmpty = autonomousState.maxConsecutiveEmptyWaves ?? 3;
+
     if (signal?.aborted) {
       stopAutonomous("manual");
       appendEntry("crew-state", autonomousState);
@@ -1192,6 +1212,15 @@ ${reason}`, {
           prd: plan.prd,
           status: "blocked",
           blockedTasks: allTasks.filter(t => t.status === "blocked").map(t => t.id)
+        });
+      } else if (autonomousState.consecutiveEmptyWaves >= maxEmpty) {
+        stopAutonomous("blocked");
+        appendEntry("crew-state", autonomousState);
+        appendEntry("crew_wave_blocked", {
+          prd: plan.prd,
+          status: "stalled",
+          reason: `${maxEmpty} consecutive waves with no progress — halting autonomous mode`,
+          readyTasks: nextReady.map(t => t.id),
         });
       } else {
         appendEntry("crew-state", autonomousState);
