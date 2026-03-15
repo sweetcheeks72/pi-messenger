@@ -136,8 +136,8 @@ const ROLE_ALIASES: Record<CrewRole, CrewRole[]> = {
   planner: [],
   worker: [],
   reviewer: [],
-  verifier: ["reviewer"],
-  auditor: ["reviewer"],
+  verifier: ["worker"],
+  auditor: ["worker"],
   researcher: ["analyst"],
   analyst: [],
 };
@@ -433,11 +433,11 @@ async function runAgent(
         store.incrementSpawnFailureCount(cwd, task.taskId);
         const currentTask = store.getTask(cwd, task.taskId);
         if (currentTask?.status === "in_progress" && currentTask.assigned_to === workerName) {
-          const MAX_SPAWN_FAILURES = 3;
+          const maxSpawnFailures = config.work.maxSpawnFailures ?? 3;
           const updatedTask = store.getTask(cwd, task.taskId);
           const spawnFailures = updatedTask?.spawn_failure_count ?? 0;
 
-          if (spawnFailures >= MAX_SPAWN_FAILURES) {
+          if (spawnFailures >= maxSpawnFailures) {
             store.updateTask(cwd, task.taskId, {
               status: "blocked",
               assigned_to: undefined,
@@ -446,7 +446,7 @@ async function runAgent(
               blocked_reason: `Spawn failed ${spawnFailures} times (${err.code ?? "unknown"}) — kill zombie processes and reset`,
             });
             store.appendTaskProgress(cwd, task.taskId, "system",
-              `Auto-blocked after ${spawnFailures} spawn failures (max: ${MAX_SPAWN_FAILURES})`);
+              `Auto-blocked after ${spawnFailures} spawn failures (max: ${maxSpawnFailures})`);
           } else {
             store.updateTask(cwd, task.taskId, {
               status: "todo",
@@ -569,7 +569,7 @@ async function runAgent(
     if (!workerTimeoutMs || workerTimeoutMs <= 0) {
       // Timeout disabled — no timer set
     } else {
-      workerTimeoutHandle = setTimeout(() => {
+      workerTimeoutHandle = setTimeout(async () => {
         if (settled) return;
         const label = task.taskId ? ` (task: ${task.taskId})` : "";
         process.stderr.write(
@@ -581,6 +581,15 @@ async function runAgent(
         }
         if (!proc.killed && proc.exitCode === null) {
           proc.kill("SIGTERM");
+          // Escalate to SIGKILL if SIGTERM doesn't work within 5s
+          const termPromise = new Promise<void>(r => proc.once("exit", () => r()));
+          const exited = await raceTimeout(termPromise, 5000);
+          if (!exited && proc.exitCode === null) {
+            process.stderr.write(
+              `[pi-messenger] Worker "${workerName}"${label} did not exit after SIGTERM — sending SIGKILL\n`
+            );
+            proc.kill("SIGKILL");
+          }
         }
       }, workerTimeoutMs);
     }

@@ -86,6 +86,7 @@ export function startAutonomous(cwd: string, concurrency: number, namespace?: st
   autonomousState.concurrency = clampConcurrency(concurrency);
   autonomousState.autoOverlayPending = true;
   autonomousState.namespace = namespace;
+  autonomousState.consecutiveEmptyWaves = 0;
 }
 
 export function stopAutonomous(reason: "completed" | "blocked" | "manual"): void {

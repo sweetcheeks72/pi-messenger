@@ -1057,6 +1057,32 @@ Usage (action-based API - preferred):
         // Re-check ready tasks after recovery; continue the loop if there's now work to do
         const recoveredReady = crewStore.getReadyTasks(cwd, { advisory: crewConfig.dependencies === "advisory" });
         if (recoveredReady.length > 0) {
+          // Check: have all recovered tasks exceeded max attempts?
+          const maxAttempts = crewConfig.work.maxAttemptsPerTask ?? 5;
+          const maxSpawnFails = crewConfig.work.maxSpawnFailures ?? 3;
+          const allExhausted = recoveredReady.every(
+            t => t.attempt_count >= maxAttempts || (t.spawn_failure_count ?? 0) >= maxSpawnFails
+          );
+          if (allExhausted) {
+            console.log(`[crew] agent_end: all recovered tasks exhausted attempts — stopping autonomous`);
+            stopAutonomous("blocked");
+            if (ctx.hasUI) {
+              ctx.ui.notify(`Autonomous stopped: all recovered tasks exhausted attempts`, "warning");
+            }
+            return;
+          }
+
+          // Check: consecutive empty wave limit (shared with work.ts via autonomousState)
+          const maxEmpty = autonomousState.maxConsecutiveEmptyWaves ?? 3;
+          if ((autonomousState.consecutiveEmptyWaves ?? 0) >= maxEmpty) {
+            console.log(`[crew] agent_end: ${maxEmpty} consecutive empty waves — stopping autonomous`);
+            stopAutonomous("blocked");
+            if (ctx.hasUI) {
+              ctx.ui.notify(`Autonomous stopped: ${maxEmpty} consecutive waves with no progress`, "warning");
+            }
+            return;
+          }
+
           const plan = crewStore.getPlan(cwd);
           pi.sendMessage({
             customType: "crew_continue",
