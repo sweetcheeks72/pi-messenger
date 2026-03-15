@@ -11,6 +11,7 @@
  *   - PhiAccrualDetector: feeds inter-heartbeat intervals for statistical
  *     failure detection (Φ accrual)
  *   - LiveWorkerInfo: pushes computed healthState for overlay rendering
+ *   - AutoEscalationPipeline: triggers escalation check after heartbeat
  */
 
 import * as store from "../store.js";
@@ -18,10 +19,16 @@ import { readLeases, writeLease } from "../leases.js";
 import { getHealthBus } from "../health-bus.js";
 import { PhiAccrualDetector } from "../phi-detector.js";
 import { patchLiveWorkerHealth } from "../live-progress.js";
+import { getAutoEscalationPipeline } from "../auto-escalation.js";
 
 export interface HeartbeatResult {
   ok: boolean;
   message: string;
+  escalations?: Array<{
+    rule: string;
+    severity: string;
+    message: string;
+  }>;
 }
 
 // =============================================================================
@@ -96,10 +103,11 @@ export async function handleHeartbeat(
     });
   }
 
-  // --- Integration: HealthBus + Φ Detector ---
+  // --- Integration: HealthBus + Φ Detector + Auto-Escalation ---
   // Wrapped in try-catch to isolate health subsystem failures from
   // core heartbeat/lease functionality. The HeartbeatResult contract
   // promises to always resolve (ok/not-ok), never reject.
+  let escalationResults: HeartbeatResult["escalations"];
   try {
     const bus = getHealthBus();
     bus.recordHeartbeat(workerId, { taskId });
@@ -111,6 +119,23 @@ export async function handleHeartbeat(
     // Uses the bus's time-based health computation (healthy/degraded/failed).
     const healthState = bus.getHealthState(workerId);
     patchLiveWorkerHealth(cwd, taskId, healthState);
+
+    // Trigger auto-escalation check after heartbeat.
+    // The pipeline evaluates all rules against this agent's enriched snapshot.
+    // Uses the same bus + detector singletons to avoid redundant state.
+    try {
+      const pipeline = getAutoEscalationPipeline(bus, detector);
+      const escalations = pipeline.evaluateAgent(workerId);
+      if (escalations.length > 0) {
+        escalationResults = escalations.map((e) => ({
+          rule: e.rule,
+          severity: e.severity,
+          message: e.message,
+        }));
+      }
+    } catch {
+      // Auto-escalation failure is non-critical — swallow silently.
+    }
   } catch {
     // Health subsystem error — swallow silently.
     // Core heartbeat (lease update, task transition) already succeeded above.
@@ -119,5 +144,6 @@ export async function handleHeartbeat(
   return {
     ok: true,
     message: `Heartbeat recorded for task ${taskId} (worker: ${workerId})`,
+    ...(escalationResults ? { escalations: escalationResults } : {}),
   };
 }
