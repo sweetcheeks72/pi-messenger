@@ -86,8 +86,6 @@ export interface Task {
   last_review?: ReviewFeedback;  // Feedback from last review (for retry)
   rollback_reason?: string;      // Reason task was rolled back and re-queued
 
-  /** Persisted progress percentage from the most recent task.progress structured call */
-  progressPct?: number;
 
   /** When true, task gets dual-worker verification: two independent workers, outputs compared */
   critical?: boolean;
@@ -301,3 +299,35 @@ export interface SpecSource {
   /** Optional display title */
   title?: string;
 }
+
+// =============================================================================
+// Thread Model Types (TASK-05)
+// =============================================================================
+
+/**
+ * A thread group aggregates a root event and its replies.
+ * Used by renderFeedSection() for threaded display.
+ */
+export interface ThreadGroup {
+  /** The root (parent) event that started the thread */
+  rootEvent: import("../feed.js").FeedEvent;
+  /** Replies sorted by timestamp */
+  replies: import("../feed.js").FeedEvent[];
+  /** Total number of replies */
+  replyCount: number;
+}
+
+/**
+ * Options for thread rendering in the overlay feed.
+ */
+export interface ThreadRenderOptions {
+  /** Maximum replies to show inline before collapsing (default: 3) */
+  maxInlineReplies: number;
+  /** Whether to show reply indicators (├─ / └─) */
+  showReplyIndicators: boolean;
+}
+
+export const DEFAULT_THREAD_RENDER_OPTIONS: ThreadRenderOptions = {
+  maxInlineReplies: 3,
+  showReplyIndicators: true,
+};

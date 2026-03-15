@@ -38,6 +38,7 @@ import { getLiveWorkers, type LiveWorkerInfo } from "./crew/live-progress.js";
 import { hasActiveWorker } from "./crew/registry.js";
 import type { ToolEntry } from "./crew/utils/progress.js";
 import { formatFeedLine as sharedFormatFeedLine, type FeedEvent } from "./feed.js";
+import { groupByThread, formatCollapseIndicator, formatReplyPrefix, shouldCollapse } from "./crew/thread-model.js";
 import { discoverCrewAgents } from "./crew/utils/discover.js";
 import { loadConfig } from "./config.js";
 import { loadCrewConfig } from "./crew/utils/config.js";
@@ -275,23 +276,72 @@ export function renderFeedSection(theme: Theme, events: FeedEvent[], width: numb
   const lines: string[] = [];
   let lastWasMessage = false;
 
-  for (const event of events) {
-    const isNew = lastSeenTs === null || event.ts > lastSeenTs;
-    const isMessage = event.type === "message";
+  const groups = groupByThread(events);
 
+  for (const group of groups) {
+    const rootEvent = group.rootEvent;
+    const isNew = lastSeenTs === null || rootEvent.ts > lastSeenTs;
+    const isMessage = rootEvent.type === "message";
+
+    // Dot separator between message and non-message groups
     if (lines.length > 0 && isMessage !== lastWasMessage) {
       lines.push(theme.fg("dim", "  ·"));
     }
 
+    // Render root event
     if (isMessage) {
-      lines.push(...renderMessageLines(theme, event, width));
+      const msgLines = renderMessageLines(theme, rootEvent, width);
+      if (group.replyCount > 0) {
+        // Append collapse indicator to the first message line
+        const indicator = formatCollapseIndicator(group.replyCount);
+        msgLines[0] = truncateToWidth(`${msgLines[0]}  ${theme.fg("dim", indicator)}`, width);
+      }
+      lines.push(...msgLines);
     } else {
-      // Add event-type icons for richer feed rendering
-      const eventIcon = getEventIcon(event.type);
-      const formatted = `${eventIcon} ${sharedFormatFeedLine(event)}`;
-      const dimmed = DIM_EVENTS.has(event.type) || !isNew;
+      const eventIcon = getEventIcon(rootEvent.type);
+      let formatted = `${eventIcon} ${sharedFormatFeedLine(rootEvent)}`;
+      if (group.replyCount > 0) {
+        const indicator = formatCollapseIndicator(group.replyCount);
+        formatted = `${formatted}  ${indicator}`;
+      }
+      const dimmed = DIM_EVENTS.has(rootEvent.type) || !isNew;
       lines.push(truncateToWidth(dimmed ? theme.fg("dim", formatted) : formatted, width));
     }
+
+    // Render replies with tree indicators
+    if (group.replies.length > 0) {
+      const collapsed = shouldCollapse(group.replyCount);
+      const repliesToShow = collapsed ? [group.replies[0]] : group.replies;
+
+      for (let i = 0; i < repliesToShow.length; i++) {
+        const reply = repliesToShow[i];
+        const isLast = !collapsed && i === repliesToShow.length - 1;
+        const prefix = formatReplyPrefix(isLast);
+        const replyIsNew = lastSeenTs === null || reply.ts > lastSeenTs;
+
+        if (reply.type === "message") {
+          const replyLines = renderMessageLines(theme, reply, width - 4);
+          const styledFirst = replyIsNew ? replyLines[0] : theme.fg("dim", replyLines[0]);
+          lines.push(truncateToWidth(`  ${prefix} ${styledFirst}`, width));
+          // Indent continuation lines of wrapped messages
+          for (let j = 1; j < replyLines.length; j++) {
+            lines.push(truncateToWidth(`  │  ${replyLines[j]}`, width));
+          }
+        } else {
+          const eventIcon = getEventIcon(reply.type);
+          const formatted = `${eventIcon} ${sharedFormatFeedLine(reply)}`;
+          const styledLine = replyIsNew ? formatted : theme.fg("dim", formatted);
+          lines.push(truncateToWidth(`  ${prefix} ${styledLine}`, width));
+        }
+      }
+
+      if (collapsed) {
+        const remaining = group.replyCount - 1;
+        const moreText = `... and ${remaining} more ${remaining === 1 ? "reply" : "replies"}`;
+        lines.push(truncateToWidth(`  ${formatReplyPrefix(true)} ${theme.fg("dim", moreText)}`, width));
+      }
+    }
+
     lastWasMessage = isMessage;
   }
   return lines;

@@ -60,6 +60,10 @@ export interface FeedEvent {
   escalation?: { reason: string; severity: "warn" | "block" | "critical"; suggestion?: string };
   // Heartbeat payload (task.heartbeat)
   heartbeat?: { taskId: string; status: string };
+  // Thread model fields (TASK-05)
+  threadId?: string;              // Thread identifier (root event ts)
+  parentEventTs?: string;         // Timestamp of the parent event being replied to
+  replyCount?: number;            // Number of replies in this thread (on root events)
 }
 
 function feedPath(cwd: string): string {
